@@ -3,6 +3,7 @@
 #include <math.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "lvgl.h"
 #include "bsp/display.h"
 #include "bsp/esp32_s3_touch_amoled_1_75.h"
@@ -15,7 +16,7 @@
 #define ROUTE_MAX_POINTS 500
 #define MARKER_ROWS 11
 #define EARTH_M 6378137.0
-#define CAMERA_FRAME_MS 40
+#define CAMERA_FRAME_MS 33
 #define CAMERA_SNAP_M 150.0
 #define ROAD_MARGIN_PX 128
 #define ROAD_BITMAP_PX (MAP_DIAMETER_PX + 2 * ROAD_MARGIN_PX)
@@ -54,10 +55,26 @@ static double s_camera_to_lat, s_camera_to_lon;
 static float s_heading_from, s_heading_delta;
 static uint32_t s_camera_start, s_camera_duration, s_last_fix_tick;
 static bool s_camera_animating;
-static bool s_camera_timer_ready;
+static bool s_camera_refresh_ready;
 static float s_east_pixels_per_e6;
 static char s_direction = 'S';
 static int32_t s_distance_m = -1;
+
+/* All counters are accessed under the LVGL lock. Rendering time includes
+ * waits inside LVGL, but the last asynchronous DMA can finish afterwards. */
+static struct {
+    int64_t window_start_us;
+    int64_t render_start_us;
+    int64_t wait_start_us;
+    int64_t render_total_us;
+    int64_t render_max_us;
+    int64_t wait_total_us;
+    int64_t camera_max_us;
+    int64_t rebuild_max_us;
+    uint32_t frames;
+    uint32_t flushes;
+    uint32_t slow_frames;
+} s_display_perf;
 
 static bool ui_lock(void) { return bsp_display_lock(1000) == ESP_OK; }
 static void ui_unlock(void) { bsp_display_unlock(); }
@@ -99,6 +116,7 @@ static int road_width(int road_class)
 
 static void rebuild_road_bitmap(void)
 {
+    const int64_t started_us = esp_timer_get_time();
     update_projection_scale();
     s_bitmap_lat = s_center_lat_e6;
     s_bitmap_lon = s_center_lon_e6;
@@ -124,6 +142,8 @@ static void rebuild_road_bitmap(void)
         lv_canvas_finish_layer(s_road_bitmap, &layer);
     }
     s_bitmap_valid = true;
+    const int64_t duration_us = esp_timer_get_time() - started_us;
+    if (duration_us > s_display_perf.rebuild_max_us) s_display_perf.rebuild_max_us = duration_us;
 }
 
 static void render_roads(bool refresh_style)
@@ -236,10 +256,64 @@ static void advance_camera(uint32_t now)
     if (t >= 1.0) s_camera_animating = false;
 }
 
-static void camera_tick(lv_timer_t *timer)
+static void display_event(lv_event_t *event)
 {
-    (void)timer;
-    advance_camera(lv_tick_get());
+    const int64_t now_us = esp_timer_get_time();
+    switch (lv_event_get_code(event)) {
+    case LV_EVENT_REFR_START: {
+        /* Update immediately before LVGL examines invalid areas. One clock
+         * drives both motion and drawing, avoiding independent timer phases. */
+        advance_camera(lv_tick_get());
+        const int64_t duration_us = esp_timer_get_time() - now_us;
+        if (duration_us > s_display_perf.camera_max_us) s_display_perf.camera_max_us = duration_us;
+        if (now_us - s_display_perf.window_start_us >= 5000000) {
+            const double seconds = (now_us - s_display_perf.window_start_us) / 1000000.0;
+            const double frames = s_display_perf.frames ? s_display_perf.frames : 1;
+            ESP_LOGI(TAG, "DISPLAY PERF lvgl_fps=%.1f render_ms=%.1f max_ms=%.1f wait_ms=%.1f "
+                     "flushes_per_frame=%.1f slow=%lu/%lu camera_max_ms=%.1f rebuild_max_ms=%.1f",
+                     s_display_perf.frames / seconds,
+                     s_display_perf.render_total_us / frames / 1000.0,
+                     s_display_perf.render_max_us / 1000.0,
+                     s_display_perf.wait_total_us / frames / 1000.0,
+                     s_display_perf.flushes / frames,
+                     (unsigned long)s_display_perf.slow_frames, (unsigned long)s_display_perf.frames,
+                     s_display_perf.camera_max_us / 1000.0, s_display_perf.rebuild_max_us / 1000.0);
+            memset(&s_display_perf, 0, sizeof(s_display_perf));
+            s_display_perf.window_start_us = esp_timer_get_time();
+        }
+        break;
+    }
+    case LV_EVENT_RENDER_START:
+        s_display_perf.render_start_us = now_us;
+        break;
+    case LV_EVENT_REFR_READY:
+        /* LVGL pauses its refresh timer at entry. Continue polling motion
+         * even when subpixel progress has not invalidated any pixels yet. */
+        if (s_camera_animating) {
+            lv_timer_t *refresh = lv_display_get_refr_timer(lv_display_get_default());
+            if (refresh) lv_timer_resume(refresh);
+        }
+        break;
+    case LV_EVENT_RENDER_READY: {
+        const int64_t duration_us = now_us - s_display_perf.render_start_us;
+        s_display_perf.render_total_us += duration_us;
+        if (duration_us > s_display_perf.render_max_us) s_display_perf.render_max_us = duration_us;
+        if (duration_us > CAMERA_FRAME_MS * 1000) s_display_perf.slow_frames++;
+        s_display_perf.frames++;
+        break;
+    }
+    case LV_EVENT_FLUSH_START:
+        s_display_perf.flushes++;
+        break;
+    case LV_EVENT_FLUSH_WAIT_START:
+        s_display_perf.wait_start_us = now_us;
+        break;
+    case LV_EVENT_FLUSH_WAIT_FINISH:
+        s_display_perf.wait_total_us += now_us - s_display_perf.wait_start_us;
+        break;
+    default:
+        break;
+    }
 }
 
 static void draw_nav_arrow(void)
@@ -349,10 +423,13 @@ void nav_ui_init(void)
     s_route_count = 0;
     draw_nav_arrow();
     draw_position_marker();
-    s_camera_timer_ready = lv_timer_create(camera_tick, CAMERA_FRAME_MS, NULL) != NULL;
-    if (!s_camera_timer_ready) {
-        ESP_LOGE(TAG, "Could not create camera animation timer");
-    }
+    lv_display_t *display = lv_display_get_default();
+    lv_timer_t *refresh = lv_display_get_refr_timer(display);
+    if (refresh) lv_timer_set_period(refresh, CAMERA_FRAME_MS);
+    s_camera_refresh_ready = lv_display_add_event_cb(display, display_event, LV_EVENT_ALL, NULL) != NULL && refresh != NULL;
+    s_display_perf.window_start_us = esp_timer_get_time();
+    ESP_LOGI(TAG, "Display motion on LVGL refresh, period=%d ms, metrics=%s",
+             CAMERA_FRAME_MS, s_camera_refresh_ready ? "enabled" : "unavailable");
     ui_unlock();
 }
 
@@ -427,7 +504,7 @@ void nav_ui_apply_gps(const roundnav_event_t *event)
     const double north = (event->lat_e6 - s_center_lat_e6) * (EARTH_M * 0.017453292519943295 / 1000000.0);
     const double east = (event->lon_e6 - s_center_lon_e6) * (EARTH_M * 0.017453292519943295 / 1000000.0)
         * cos(s_center_lat_e6 * 0.017453292519943295 / 1000000.0);
-    const bool snap = !s_gps_valid || !s_camera_timer_ready || hypot(north, east) > CAMERA_SNAP_M;
+    const bool snap = !s_gps_valid || !s_camera_refresh_ready || hypot(north, east) > CAMERA_SNAP_M;
     uint32_t interval = s_gps_valid ? now - s_last_fix_tick : 1000;
     if (interval < 200) interval = 200;
     if (interval > 1500) interval = 1500;
@@ -445,6 +522,13 @@ void nav_ui_apply_gps(const roundnav_event_t *event)
     s_gps_valid = true;
     s_camera_animating = !snap && (fabs(s_camera_to_lat - s_camera_from_lat) > 0.001
         || fabs(s_camera_to_lon - s_camera_from_lon) > 0.001 || fabsf(s_heading_delta) > 0.01f);
+    if (s_camera_animating) {
+        lv_timer_t *refresh = lv_display_get_refr_timer(lv_display_get_default());
+        if (refresh) {
+            lv_timer_resume(refresh);
+            lv_timer_ready(refresh);
+        }
+    }
     if (snap) {
         s_center_lat_e6 = event->lat_e6;
         s_center_lon_e6 = event->lon_e6;
