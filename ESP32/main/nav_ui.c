@@ -2,6 +2,7 @@
 #include <string.h>
 #include <math.h>
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "lvgl.h"
 #include "bsp/display.h"
 #include "bsp/esp32_s3_touch_amoled_1_75.h"
@@ -16,10 +17,18 @@
 #define EARTH_M 6378137.0
 #define CAMERA_FRAME_MS 40
 #define CAMERA_SNAP_M 150.0
+#define ROAD_MARGIN_PX 128
+#define ROAD_BITMAP_PX (MAP_DIAMETER_PX + 2 * ROAD_MARGIN_PX)
+#define NORTH_PIXELS_PER_E6 (0.017453292519943295 * EARTH_M / 1000000.0 * MAP_RADIUS_PX / MAP_RADIUS_M)
 
 static const char *TAG = "RoundNavUI";
 
 static lv_obj_t *s_map_clip;
+static lv_obj_t *s_road_bitmap;
+static double s_bitmap_lat, s_bitmap_lon;
+static float s_bitmap_east_scale;
+static int s_bitmap_dx, s_bitmap_dy;
+static bool s_bitmap_valid;
 static lv_obj_t *s_ble_label;
 static lv_obj_t *s_nav_label;
 static lv_obj_t *s_distance_label;
@@ -57,9 +66,8 @@ static void project_point(const geo_point_t *p, lv_point_precise_t *out)
 {
     if (!s_center_valid) { out->x = MAP_RADIUS_PX; out->y = MAP_RADIUS_PX; return; }
     /* Subtract in double before converting to float; preserve local detail. */
-    const float north_pixels_per_e6 = 0.017453292519943295 * EARTH_M / 1000000.0 * MAP_RADIUS_PX / MAP_RADIUS_M;
     out->x = (lv_coord_t)(MAP_RADIUS_PX + (float)(p->lon - s_center_lon_e6) * s_east_pixels_per_e6);
-    out->y = (lv_coord_t)(MAP_RADIUS_PX - (float)(p->lat - s_center_lat_e6) * north_pixels_per_e6);
+    out->y = (lv_coord_t)(MAP_RADIUS_PX - (float)(p->lat - s_center_lat_e6) * NORTH_PIXELS_PER_E6);
 }
 
 static void update_projection_scale(void)
@@ -89,9 +97,52 @@ static int road_width(int road_class)
     return 2;
 }
 
+static void rebuild_road_bitmap(void)
+{
+    update_projection_scale();
+    s_bitmap_lat = s_center_lat_e6;
+    s_bitmap_lon = s_center_lon_e6;
+    s_bitmap_east_scale = s_east_pixels_per_e6;
+    lv_canvas_fill_bg(s_road_bitmap, lv_color_hex(0x0A1018), LV_OPA_COVER);
+    for (int r = 0; r < ROAD_MAX_COUNT; ++r) {
+        const road_t *road = &s_road_store.roads[r];
+        if (!road->active || road->count < 2) continue;
+        lv_layer_t layer;
+        lv_canvas_init_layer(s_road_bitmap, &layer);
+        lv_draw_line_dsc_t line;
+        lv_draw_line_dsc_init(&line);
+        line.color = road_color(road->road_class);
+        line.width = road_width(road->road_class);
+        line.round_start = line.round_end = true;
+        for (int i = 0; i < road->count; ++i) {
+            project_point(&road->points[i], &line.p2);
+            line.p2.x += ROAD_MARGIN_PX;
+            line.p2.y += ROAD_MARGIN_PX;
+            if (i > 0) lv_draw_line(&layer, &line);
+            line.p1 = line.p2;
+        }
+        lv_canvas_finish_layer(s_road_bitmap, &layer);
+    }
+    s_bitmap_valid = true;
+}
+
 static void render_roads(bool refresh_style)
 {
     if (s_map_clip == NULL) return;
+    if (s_road_bitmap) {
+        int dx = (int)lround((s_bitmap_lon - s_center_lon_e6) * s_bitmap_east_scale);
+        int dy = (int)lround((s_center_lat_e6 - s_bitmap_lat) * NORTH_PIXELS_PER_E6);
+        if (refresh_style || !s_bitmap_valid || abs(dx) > ROAD_MARGIN_PX || abs(dy) > ROAD_MARGIN_PX) {
+            rebuild_road_bitmap();
+            dx = dy = 0;
+        }
+        if (dx != s_bitmap_dx || dy != s_bitmap_dy) {
+            lv_obj_set_pos(s_road_bitmap, dx - ROAD_MARGIN_PX, dy - ROAD_MARGIN_PX);
+            s_bitmap_dx = dx;
+            s_bitmap_dy = dy;
+        }
+        return;
+    }
     update_projection_scale();
     for (int r = 0; r < ROAD_MAX_COUNT; ++r) {
         road_t *road = &s_road_store.roads[r];
@@ -178,7 +229,7 @@ static void advance_camera(uint32_t now)
     const float heading = fmodf(s_heading_from + s_heading_delta * (float)t + 360.0f, 360.0f);
     render_roads(false);
     render_route();
-    if (fabsf(heading - s_heading_deg) > 0.01f || t >= 1.0) {
+    if (fabsf(heading - s_heading_deg) > 0.01f) {
         s_heading_deg = heading;
         draw_position_marker();
     }
@@ -260,6 +311,21 @@ void nav_ui_init(void)
     lv_obj_set_style_border_width(s_map_clip, 2, 0);
     lv_obj_set_style_pad_all(s_map_clip, 0, 0);
     lv_obj_clear_flag(s_map_clip, LV_OBJ_FLAG_SCROLLABLE);
+
+    const size_t stride = lv_draw_buf_width_to_stride(ROAD_BITMAP_PX, LV_COLOR_FORMAT_RGB565);
+    void *pixels = heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN, stride * ROAD_BITMAP_PX,
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (pixels) {
+        s_road_bitmap = lv_canvas_create(s_map_clip);
+        if (s_road_bitmap) {
+            lv_canvas_set_buffer(s_road_bitmap, pixels, ROAD_BITMAP_PX, ROAD_BITMAP_PX, LV_COLOR_FORMAT_RGB565);
+            lv_canvas_fill_bg(s_road_bitmap, lv_color_hex(0x0A1018), LV_OPA_COVER);
+            lv_obj_set_pos(s_road_bitmap, -ROAD_MARGIN_PX, -ROAD_MARGIN_PX);
+        } else {
+            heap_caps_free(pixels);
+        }
+    }
+    ESP_LOGI(TAG, "Road renderer: %s", s_road_bitmap ? "cached bitmap" : "vector fallback");
 
     s_nav_label = lv_label_create(screen);
     lv_label_set_text(s_nav_label, "STRAIGHT");
