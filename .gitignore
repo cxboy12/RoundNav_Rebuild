@@ -18,6 +18,8 @@ ESP32/.clangd
 backups/
 deliverables/
 tests/out/
+新建文件夹/
+*.bak
 
 # OS/editor noise
 .DS_Store
