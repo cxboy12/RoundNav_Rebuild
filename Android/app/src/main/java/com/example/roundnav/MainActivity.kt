@@ -20,6 +20,16 @@ import androidx.core.content.ContextCompat
 class MainActivity : ComponentActivity() {
     private lateinit var status: TextView
     private lateinit var liveStatus: TextView
+    private lateinit var destLat: EditText
+    private lateinit var destLon: EditText
+    private val mapLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val data = result.data
+        if (result.resultCode == RESULT_OK && data != null) {
+            destLat.setText(data.getDoubleExtra("latitude", 0.0).toString())
+            destLon.setText(data.getDoubleExtra("longitude", 0.0).toString())
+            status.text = "已从地图选择目的地，可使用下方路线规划按钮"
+        }
+    }
     private val statusHandler = Handler(Looper.getMainLooper())
     private val refreshStatus = object : Runnable {
         override fun run() {
@@ -47,6 +57,10 @@ class MainActivity : ComponentActivity() {
         content.addView(liveStatus, ViewGroup.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
         status = TextView(this).apply { text = "连接圆屏后自动加载附近道路，地图跟随手机位置。"; textSize = 14f }
         content.addView(status, ViewGroup.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        addButton(content, "打开地图 / 长按选择目的地") {
+            mapLauncher.launch(Intent(this, MapActivity::class.java))
+        }
 
         addButton(content, "检查 / 请求权限") { requestNeededPermissions() }
         addButton(content, "启动蓝牙 + GPS + 自动跟随地图") {
@@ -99,14 +113,15 @@ class MainActivity : ComponentActivity() {
                 .setAction(BridgeService.ACTION_COARSE_MAP))
             status.text = "允许60秒内、精度≤1000米的手机定位预览道路；可能不在实际所在街道。点启动恢复精确模式。"
         }
-        val destLat = EditText(this).apply {
+        val savedDestination = DestinationStore.load(this)
+        destLat = EditText(this).apply {
             hint = "目的地纬度（例如 30.662）"
-            setText("30.662")
+            setText(savedInstanceState?.getString("destinationLat") ?: savedDestination?.latitude?.toString() ?: "29.875")
             inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
         }
-        val destLon = EditText(this).apply {
+        destLon = EditText(this).apply {
             hint = "目的地经度（例如 104.075）"
-            setText("104.075")
+            setText(savedInstanceState?.getString("destinationLon") ?: savedDestination?.longitude?.toString() ?: "121.55")
             inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
         }
         content.addView(destLat, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -142,6 +157,12 @@ class MainActivity : ComponentActivity() {
         root.addView(scroll)
         setContentView(root)
         if (!hasRequiredPermissions()) requestNeededPermissions()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("destinationLat", destLat.text.toString())
+        outState.putString("destinationLon", destLon.text.toString())
+        super.onSaveInstanceState(outState)
     }
 
     override fun onResume() {
