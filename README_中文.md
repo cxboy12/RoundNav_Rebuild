@@ -1,5 +1,12 @@
 # RoundNav 重建源码包（ESP32 + Android）
 
+DMA 兼容性修复（2026-11-22）：
+
+- 直接 PSRAM DMA 版本在此板实测出现 `recycle spi transactions failed / ESP_ERR_INVALID_STATE`，随后 LVGL 锁超时。该版本尚未完成硬件验收。
+- 当前构建改用内部 RAM 中转 DMA。保留 320 行 PSRAM 绘图缓冲，SPI 将每次提交拆成最多 16 行的小事务，队列深度为 1，将单次中转内存控制在约 15 KB。
+- 启动应出现 `RoundNav display: draw_rows=320, tx_rows=16, queue=1, internal DMA`。烧录后检查是否正常显示、蓝牙连接及模拟移动，并提供 30 秒的 `DISPLAY PERF` 日志。
+- `flushes_per_frame` 是 LVGL 提交次数，SPI 内部还会拆分小事务。两者分别受绘图缓冲和传输上限控制。
+
 显示传输优化（2026-11-22）：
 
 - 根据实机日志，每帧约 297 毫秒、16 次分批传输，地图位置计算约 0.5 毫秒。本轮将 BSP 的绘图缓冲区从 20 行增至 320 行，同时匹配 SPI 最大传输尺寸，启用 PSRAM 直接 DMA，并将传输队列深度设为 1。

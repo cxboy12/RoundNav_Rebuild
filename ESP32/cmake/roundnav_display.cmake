@@ -1,5 +1,7 @@
 # BSP 3.0.1 hardcodes a 20-row transfer and draw buffer. Build a configured
 # copy so dependency downloads remain intact and clean checkouts reproduce it.
+# Keep drawing in large PSRAM buffers, but let esp_lcd split each flush into
+# small internal-RAM DMA transactions. Direct PSRAM DMA failed on this board.
 idf_component_get_property(roundnav_bsp_dir waveshare__esp32_s3_touch_amoled_1_75 COMPONENT_DIR)
 idf_component_get_property(roundnav_bsp_lib waveshare__esp32_s3_touch_amoled_1_75 COMPONENT_LIB)
 set(roundnav_bsp_source "${roundnav_bsp_dir}/esp32_s3_touch_amoled_1_75.c")
@@ -17,13 +19,13 @@ endfunction()
 
 roundnav_replace_bsp(
     ".max_transfer_sz = BSP_LCD_H_RES * 20 * BSP_LCD_BITS_PER_PIXEL / 8,"
-    ".max_transfer_sz = BSP_LCD_H_RES * 320 * BSP_LCD_BITS_PER_PIXEL / 8,")
+    ".max_transfer_sz = BSP_LCD_H_RES * 16 * BSP_LCD_BITS_PER_PIXEL / 8,")
 roundnav_replace_bsp(".buffer_height = 20," ".buffer_height = 320,")
 roundnav_replace_bsp(
     "io_config.trans_queue_depth = CONFIG_BSP_LCD_TRANS_QUEUE_DEPTH;"
     "io_config.trans_queue_depth = 1;
-    io_config.flags.psram_dma_direct = true;
-    ESP_LOGI(TAG, \"RoundNav display: rows=320, queue=1, direct PSRAM DMA\");")
+    io_config.flags.psram_dma_direct = false;
+    ESP_LOGI(TAG, \"RoundNav display: draw_rows=320, tx_rows=16, queue=1, internal DMA\");")
 
 set(roundnav_configured_bsp "${CMAKE_BINARY_DIR}/roundnav_bsp/esp32_s3_touch_amoled_1_75.c")
 get_filename_component(roundnav_configured_dir "${roundnav_configured_bsp}" DIRECTORY)
