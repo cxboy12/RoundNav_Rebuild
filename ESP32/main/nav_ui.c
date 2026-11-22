@@ -66,9 +66,11 @@ static struct {
     int64_t window_start_us;
     int64_t render_start_us;
     int64_t wait_start_us;
+    int64_t flush_start_us;
     int64_t render_total_us;
     int64_t render_max_us;
     int64_t wait_total_us;
+    int64_t flush_total_us;
     int64_t camera_max_us;
     int64_t rebuild_max_us;
     uint32_t frames;
@@ -269,12 +271,13 @@ static void display_event(lv_event_t *event)
         if (now_us - s_display_perf.window_start_us >= 5000000) {
             const double seconds = (now_us - s_display_perf.window_start_us) / 1000000.0;
             const double frames = s_display_perf.frames ? s_display_perf.frames : 1;
-            ESP_LOGI(TAG, "DISPLAY PERF lvgl_fps=%.1f render_ms=%.1f max_ms=%.1f wait_ms=%.1f "
+            ESP_LOGI(TAG, "DISPLAY PERF lvgl_fps=%.1f render_ms=%.1f max_ms=%.1f wait_ms=%.1f submit_ms=%.1f "
                      "flushes_per_frame=%.1f slow=%lu/%lu camera_max_ms=%.1f rebuild_max_ms=%.1f",
                      s_display_perf.frames / seconds,
                      s_display_perf.render_total_us / frames / 1000.0,
                      s_display_perf.render_max_us / 1000.0,
                      s_display_perf.wait_total_us / frames / 1000.0,
+                     s_display_perf.flush_total_us / frames / 1000.0,
                      s_display_perf.flushes / frames,
                      (unsigned long)s_display_perf.slow_frames, (unsigned long)s_display_perf.frames,
                      s_display_perf.camera_max_us / 1000.0, s_display_perf.rebuild_max_us / 1000.0);
@@ -304,6 +307,10 @@ static void display_event(lv_event_t *event)
     }
     case LV_EVENT_FLUSH_START:
         s_display_perf.flushes++;
+        s_display_perf.flush_start_us = now_us;
+        break;
+    case LV_EVENT_FLUSH_FINISH:
+        s_display_perf.flush_total_us += now_us - s_display_perf.flush_start_us;
         break;
     case LV_EVENT_FLUSH_WAIT_START:
         s_display_perf.wait_start_us = now_us;
