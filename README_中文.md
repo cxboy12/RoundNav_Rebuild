@@ -1,5 +1,12 @@
 # RoundNav 重建源码包（ESP32 + Android）
 
+道路接收与绘制锁修复（2026-11-22）：
+
+- 原先道路点从 BLE 队列取出后，等待 LVGL 锁超过一秒便被丢弃，会使整批道路不完整。现在等待锁后处理该事件，并让显示任务在两轮绘制之间至少等待一个系统节拍，避免 1 毫秒等待被换算成零节拍。事件处理任务优先级高于显示任务，释放锁后优先处理已排队数据，空闲时阻塞等待队列。
+- 圆形视野改为预生成的静态遮罩覆盖方形地图边角，减少滚动底图的动态圆角裁剪开销。遮罩分配失败时继续使用原圆角裁剪。
+- 烧录后运行室内模拟移动，检查 `Map clipping: static surround`、`Road snapshot begin: expected=...`、`Road snapshot committed: roads=...`，并记录 `DISPLAY PERF`。这组日志可区分未收到完整道路与绘制慢。
+- 改动已做编译检查，地图恢复显示及新的帧耗时仍需实机验收。
+
 DMA 兼容性修复（2026-11-22）：
 
 - 直接 PSRAM DMA 版本在此板实测出现 `recycle spi transactions failed / ESP_ERR_INVALID_STATE`，随后 LVGL 锁超时。该版本尚未完成硬件验收。

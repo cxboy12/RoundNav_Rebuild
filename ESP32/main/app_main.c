@@ -3,6 +3,7 @@
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/task.h"
 #include "bsp/display.h"
 #include "bsp/esp32_s3_touch_amoled_1_75.h"
 #include "roundnav_events.h"
@@ -29,12 +30,24 @@ void app_main(void)
     }
 
     ESP_LOGI(TAG, "Starting Waveshare 1.75-inch AMOLED display");
-    if (bsp_display_start() == NULL) {
+    bsp_display_cfg_t display_config = {
+        .lv_adapter_cfg = ESP_LV_ADAPTER_DEFAULT_CONFIG(),
+        .rotation = ESP_LV_ADAPTER_ROTATE_0,
+        .tear_avoid_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_NONE,
+        .touch_flags = { .swap_xy = 0, .mirror_x = 1, .mirror_y = 1 },
+    };
+    /* A 1 ms delay rounds down to zero at CONFIG_FREERTOS_HZ=100.
+     * Leave a full tick for the queued BLE consumer between render passes. */
+    display_config.lv_adapter_cfg.task_min_delay_ms = portTICK_PERIOD_MS;
+    if (bsp_display_start_with_config(&display_config) == NULL) {
         ESP_LOGE(TAG, "bsp_display_start failed");
         return;
     }
     nav_ui_init();
     ESP_ERROR_CHECK(roundnav_ble_init(s_ui_queue));
+    /* Let the event consumer acquire the released mutex before the display
+     * worker starts another frame. The consumer blocks on its queue when idle. */
+    vTaskPrioritySet(NULL, display_config.lv_adapter_cfg.task_priority + 1);
     ESP_LOGI(TAG, "Ready. BLE name=RoundNav; GPS command: G,lat_e6,lon_e6,bearing_deg");
 
     roundnav_event_t event;

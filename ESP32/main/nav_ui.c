@@ -78,7 +78,9 @@ static struct {
     uint32_t slow_frames;
 } s_display_perf;
 
-static bool ui_lock(void) { return bsp_display_lock(1000) == ESP_OK; }
+/* Events have already left the BLE queue. Wait rather than discarding one
+ * point of a road snapshot merely because a render pass owns the lock. */
+static bool ui_lock(void) { return bsp_display_lock(UINT32_MAX) == ESP_OK; }
 static void ui_unlock(void) { bsp_display_unlock(); }
 
 static void project_point(const geo_point_t *p, lv_point_precise_t *out)
@@ -374,6 +376,40 @@ static void update_nav_label(void)
     lv_label_set_text(s_distance_label, d);
 }
 
+static void create_map_surround(lv_obj_t *screen)
+{
+    const size_t stride = lv_draw_buf_width_to_stride(MAP_DIAMETER_PX, LV_COLOR_FORMAT_ARGB8888);
+    uint8_t *pixels = heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN, stride * MAP_DIAMETER_PX,
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!pixels) {
+        ESP_LOGW(TAG, "Map surround allocation failed; using circular clip");
+        return;
+    }
+    /* An opaque surround with a transparent centre keeps the circle without
+     * asking LVGL to render the scrolling bitmap into a clipped layer. */
+    for (int y = 0; y < MAP_DIAMETER_PX; ++y) {
+        uint32_t *row = (uint32_t *)(pixels + y * stride);
+        for (int x = 0; x < MAP_DIAMETER_PX; ++x) {
+            const float dx = x + 0.5f - MAP_RADIUS_PX;
+            const float dy = y + 0.5f - MAP_RADIUS_PX;
+            const float distance = sqrtf(dx * dx + dy * dy);
+            if (distance >= MAP_RADIUS_PX) row[x] = 0xFF05080D;
+            else if (distance >= MAP_RADIUS_PX - 2.0f) row[x] = 0xFF344252;
+            else row[x] = 0;
+        }
+    }
+    lv_obj_t *surround = lv_canvas_create(screen);
+    if (!surround) {
+        heap_caps_free(pixels);
+        return;
+    }
+    lv_canvas_set_buffer(surround, pixels, MAP_DIAMETER_PX, MAP_DIAMETER_PX, LV_COLOR_FORMAT_ARGB8888);
+    lv_obj_align(surround, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_remove_flag(surround, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_clip_corner(s_map_clip, false, 0);
+    ESP_LOGI(TAG, "Map clipping: static surround");
+}
+
 void nav_ui_init(void)
 {
     if (!ui_lock()) { ESP_LOGE(TAG, "Could not lock LVGL during UI init"); return; }
@@ -407,6 +443,7 @@ void nav_ui_init(void)
         }
     }
     ESP_LOGI(TAG, "Road renderer: %s", s_road_bitmap ? "cached bitmap" : "vector fallback");
+    create_map_surround(screen);
 
     s_nav_label = lv_label_create(screen);
     lv_label_set_text(s_nav_label, "STRAIGHT");
@@ -485,6 +522,9 @@ void nav_ui_apply_map_event(const roundnav_event_t *event)
 void nav_ui_apply_road_event(const roundnav_event_t *event)
 {
     if (event == NULL || !ui_lock()) return;
+    if (event->type == ROUNDNAV_EVENT_ROAD_SNAPSHOT_BEGIN) {
+        ESP_LOGI(TAG, "Road snapshot begin: expected=%d", event->count);
+    }
     /* Road fetch coordinates describe downloaded coverage, never override live GPS. */
     if (event->type == ROUNDNAV_EVENT_ROAD_CENTER && !s_gps_valid) {
         s_center_lat_e6 = event->lat_e6;
@@ -498,7 +538,13 @@ void nav_ui_apply_road_event(const roundnav_event_t *event)
         render_route();
         if (s_route_line) lv_obj_move_foreground(s_route_line);
         draw_position_marker();
-        if (event->type == ROUNDNAV_EVENT_ROAD_SNAPSHOT_END) ESP_LOGI(TAG, "Road snapshot committed");
+        if (event->type == ROUNDNAV_EVENT_ROAD_SNAPSHOT_END) {
+            int active_roads = 0;
+            for (int r = 0; r < ROAD_MAX_COUNT; ++r) {
+                if (s_road_store.roads[r].active) active_roads++;
+            }
+            ESP_LOGI(TAG, "Road snapshot committed: roads=%d", active_roads);
+        }
     }
     ui_unlock();
 }
