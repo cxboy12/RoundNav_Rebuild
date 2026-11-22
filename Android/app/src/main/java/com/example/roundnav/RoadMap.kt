@@ -18,6 +18,14 @@ internal object RoadMap {
     const val MAX_LOCATION_AGE_MS = 15_000L
     const val MAX_LOCATION_ACCURACY_M = 50f
 
+    /** 5 m/s, 270 m north then back, repeated without a discontinuity at the loop. */
+    fun simulationOffsetMeters(step: Long): Double {
+        val phase = step % 108
+        return (if (phase <= 54) phase else 108 - phase) * 5.0
+    }
+
+    fun simulationBearing(step: Long): Int = if (step % 108 < 54) 0 else 180
+
     fun distanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
         val dy = Math.toRadians(lat2 - lat1) * 6_378_137.0
         val dx = Math.toRadians(lon2 - lon1) * 6_378_137.0 * cos(Math.toRadians((lat1 + lat2) / 2))

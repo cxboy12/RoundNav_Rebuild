@@ -18,6 +18,17 @@ public final class RoadMapChecks {
     }
     public static void main(String[] args) {
         double lat = 29.8683, lon = 121.5440;
+        verify(map.simulationOffsetMeters(0) == 0 && map.simulationOffsetMeters(54) == 270,
+            "Indoor simulation advances north to 270 m");
+        verify(map.simulationOffsetMeters(108) == 0 && map.simulationOffsetMeters(109) == 5,
+            "Indoor simulation returns continuously and repeats");
+        verify(map.simulationBearing(53) == 0 && map.simulationBearing(54) == 180,
+            "Simulation heading changes at the turnaround");
+        for (long i = 1; i <= 216; i++) {
+            if (Math.abs(map.simulationOffsetMeters(i) - map.simulationOffsetMeters(i - 1)) != 5)
+                throw new AssertionError("Simulation jumps or stalls at step " + i);
+        }
+        verify(true, "Simulation stays continuous through two full loops");
         verify(map.needsRefresh(lat, lon, null, null), "First location loads roads");
         verify(!map.needsRefresh(lat + 0.0001, lon, lat, lon), "Small movements pan without fetching");
         verify(map.needsRefresh(lat + 0.0008, lon, lat, lon), "Movement beyond 75 m fetches coverage");

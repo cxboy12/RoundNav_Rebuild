@@ -87,6 +87,18 @@ class MainActivity : ComponentActivity() {
                 .setAction(BridgeService.ACTION_TEST_ROADS))
             status.text = "测试位置：宁波 29.8683, 121.5440；用于验证下载与圆屏显示，点启动恢复真实定位。"
         }
+        addButton(content, "室内模拟移动（自动往返，测试地图跟随）") {
+            if (!hasRequiredPermissions()) { requestNeededPermissions(); return@addButton }
+            ContextCompat.startForegroundService(this, Intent(this, BridgeService::class.java)
+                .setAction(BridgeService.ACTION_SIMULATE))
+            status.text = "宁波模拟点以5米/秒往返，观察道路平移和自动补图；点启动恢复真实定位。"
+        }
+        addButton(content, "室内粗略位置预览（允许≤1000米，位置可能偏差）") {
+            if (!hasRequiredPermissions()) { requestNeededPermissions(); return@addButton }
+            ContextCompat.startForegroundService(this, Intent(this, BridgeService::class.java)
+                .setAction(BridgeService.ACTION_COARSE_MAP))
+            status.text = "允许60秒内、精度≤1000米的手机定位预览道路；可能不在实际所在街道。点启动恢复精确模式。"
+        }
         val destLat = EditText(this).apply {
             hint = "目的地纬度（例如 30.662）"
             setText("30.662")
