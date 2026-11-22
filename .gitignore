@@ -1,0 +1,25 @@
+# Android Studio / Gradle
+**/.gradle/
+**/.idea/
+**/.kotlin/
+**/build/
+**/local.properties
+*.iml
+
+# ESP-IDF generated configuration, build output, and local editor files
+ESP32/sdkconfig
+ESP32/sdkconfig.old
+ESP32/build/
+ESP32/managed_components/
+ESP32/.vscode/
+ESP32/.clangd
+
+# Local backups, generated packages, and test output
+backups/
+deliverables/
+tests/out/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp

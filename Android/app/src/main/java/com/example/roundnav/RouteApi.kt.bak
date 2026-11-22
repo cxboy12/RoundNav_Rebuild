@@ -1,0 +1,121 @@
+package com.example.roundnav
+
+import org.json.JSONArray
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import kotlin.math.roundToInt
+
+internal data class RouteResult(val coordinates: List<Pair<Double, Double>>)
+
+/** Basic Valhalla motorcycle route request. The server's /route endpoint must proxy Valhalla's native JSON API. */
+internal object RouteApi {
+    fun fetchMotorcycleRoute(
+        fromLat: Double, fromLon: Double,
+        toLat: Double, toLon: Double,
+        callback: (RouteResult?, Throwable?) -> Unit
+    ) {
+        Thread {
+            var connection: HttpURLConnection? = null
+            try {
+                val request = JSONObject().apply {
+                    put("locations", JSONArray().put(
+                        JSONObject().put("lat", fromLat).put("lon", fromLon).put("type", "break")
+                    ).put(
+                        JSONObject().put("lat", toLat).put("lon", toLon).put("type", "break")
+                    ))
+                    put("costing", "motorcycle")
+                    put("units", "kilometers")
+                    put("shape_format", "polyline6")
+                }
+                connection = (URL("${BuildConfig.ROUNDNAV_BASE_URL}/route").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 15_000
+                    readTimeout = 30_000
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                    setRequestProperty("Accept", "application/json")
+                }
+                connection.outputStream.use { it.write(request.toString().toByteArray(Charsets.UTF_8)) }
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val body = stream.bufferedReader().use { it.readText() }
+                if (code !in 200..299) error("Route HTTP $code: $body")
+                val json = JSONObject(body)
+                val direct = json.optJSONArray("coordinates")
+                val coords = if (direct != null) parseCoordinateArray(direct) else {
+                    val shape = json.optJSONObject("trip")?.optJSONArray("legs")
+                        ?.optJSONObject(0)?.optString("shape", "")
+                        ?: json.optJSONArray("trip")?.optJSONObject(0)?.optString("shape", "")
+                        ?: ""
+                    decodePolyline6(shape)
+                }
+                if (coords.size < 2) error("Route response contains no usable route coordinates")
+                callback(RouteResult(coords), null)
+            } catch (t: Throwable) {
+                callback(null, t)
+            } finally {
+                connection?.disconnect()
+            }
+        }.start()
+    }
+
+    private fun parseCoordinateArray(array: JSONArray): List<Pair<Double, Double>> {
+        val out = mutableListOf<Pair<Double, Double>>()
+        for (i in 0 until array.length()) {
+            val p = array.optJSONArray(i) ?: continue
+            if (p.length() >= 2) out.add(p.optDouble(0) to p.optDouble(1)) // lon,lat
+        }
+        return out
+    }
+
+    private fun decodePolyline6(encoded: String): List<Pair<Double, Double>> {
+        if (encoded.isBlank()) return emptyList()
+        val points = mutableListOf<Pair<Double, Double>>()
+        var index = 0
+        var lat = 0
+        var lon = 0
+        while (index < encoded.length) {
+            var result = 0
+            var shift = 0
+            var b: Int
+            do {
+                if (index >= encoded.length) return points
+                b = encoded[index++].code - 63
+                result = result or ((b and 0x1f) shl shift)
+                shift += 5
+            } while (b >= 0x20)
+            val dLat = if ((result and 1) != 0) (result shr 1).inv() else result shr 1
+            lat += dLat
+            result = 0
+            shift = 0
+            do {
+                if (index >= encoded.length) return points
+                b = encoded[index++].code - 63
+                result = result or ((b and 0x1f) shl shift)
+                shift += 5
+            } while (b >= 0x20)
+            val dLon = if ((result and 1) != 0) (result shr 1).inv() else result shr 1
+            lon += dLon
+            points.add((lon / 1_000_000.0) to (lat / 1_000_000.0))
+        }
+        return points
+    }
+
+    fun toBleCommands(route: RouteResult): ArrayList<String> {
+        val points = route.coordinates
+        val limit = 500
+        val selected = if (points.size <= limit) points else {
+            val step = (points.size - 1).toDouble() / (limit - 1).toDouble()
+            (0 until limit).map { points[(it * step).roundToInt()] }
+        }
+        val commands = arrayListOf("B,${selected.size}")
+        selected.forEachIndexed { index, p ->
+            val lon = p.first
+            val lat = p.second
+            commands.add("P,$index,${(lat * 1e6).roundToInt()},${(lon * 1e6).roundToInt()}")
+        }
+        commands.add("E")
+        return commands
+    }
+}

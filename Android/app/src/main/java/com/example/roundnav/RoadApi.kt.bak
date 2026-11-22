@@ -1,0 +1,85 @@
+package com.example.roundnav
+
+import android.util.Log
+import org.json.JSONArray
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+
+internal data class NearbyRoad(
+    val name: String,
+    val type: String,
+    /** Coordinates are stored as (longitude, latitude). */
+    val points: List<Pair<Double, Double>>
+)
+
+internal object RoadApi {
+    private const val TAG = "RoundNavRoadApi"
+
+    fun fetchNearby(
+        latitude: Double,
+        longitude: Double,
+        radiusMeters: Double,
+        callback: (List<NearbyRoad>, Throwable?) -> Unit
+    ) {
+        Thread {
+            var connection: HttpURLConnection? = null
+            try {
+                val url = URL(
+                    "${BuildConfig.ROUNDNAV_BASE_URL}/nearby-roads" +
+                        "?lat=$latitude&lon=$longitude&radius=$radiusMeters"
+                )
+                connection = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 10_000
+                    readTimeout = 20_000
+                    setRequestProperty("Accept", "application/json")
+                }
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val body = stream.bufferedReader().use { it.readText() }
+                if (code !in 200..299) error("Nearby roads HTTP $code: $body")
+                val roads = parseRoads(JSONObject(body))
+                Log.i(TAG, "Nearby roads OK: ${roads.size}")
+                callback(roads, null)
+            } catch (t: Throwable) {
+                callback(emptyList(), t)
+            } finally {
+                connection?.disconnect()
+            }
+        }.start()
+    }
+
+    private fun parseRoads(root: JSONObject): List<NearbyRoad> {
+        val result = mutableListOf<NearbyRoad>()
+        val roads = root.optJSONArray("roads") ?: root.optJSONArray("features") ?: JSONArray()
+        for (i in 0 until roads.length()) {
+            val item = roads.optJSONObject(i) ?: continue
+            val properties = item.optJSONObject("properties") ?: item
+            val geometry = item.optJSONObject("geometry")
+            val rawType = properties.optString("type", properties.optString("highway", "road"))
+            val name = properties.optString("name", "")
+            val coordinateArray = item.optJSONArray("coordinates")
+                ?: geometry?.optJSONArray("coordinates")
+                ?: continue
+            val points = mutableListOf<Pair<Double, Double>>()
+            // Accept LineString coordinates [[lon,lat], ...] and MultiLineString [[[lon,lat],...], ...].
+            val first = coordinateArray.opt(0)
+            val line = if (first is JSONArray && first.opt(0) is JSONArray) {
+                coordinateArray.optJSONArray(0) ?: JSONArray()
+            } else coordinateArray
+            for (j in 0 until line.length()) {
+                val pair = line.optJSONArray(j) ?: continue
+                if (pair.length() < 2) continue
+                val lon = pair.optDouble(0, Double.NaN)
+                val lat = pair.optDouble(1, Double.NaN)
+                if (lon.isFinite() && lat.isFinite() && lat in -90.0..90.0 && lon in -180.0..180.0) {
+                    points.add(lon to lat)
+                }
+            }
+            if (points.size >= 2) result.add(NearbyRoad(name, rawType, points))
+        }
+        return result
+    }
+}
