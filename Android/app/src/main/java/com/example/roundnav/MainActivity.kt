@@ -78,6 +78,15 @@ class MainActivity : ComponentActivity() {
             ContextCompat.startForegroundService(this, i)
             status.text = "已请求刷新；实际进度见上方道路状态"
         }
+        addButton(content, "宁波固定坐标测试道路（非实时，启动按钮恢复）") {
+            if (!hasRequiredPermissions()) {
+                requestNeededPermissions()
+                return@addButton
+            }
+            ContextCompat.startForegroundService(this, Intent(this, BridgeService::class.java)
+                .setAction(BridgeService.ACTION_TEST_ROADS))
+            status.text = "测试位置：宁波 29.8683, 121.5440；用于验证下载与圆屏显示，点启动恢复真实定位。"
+        }
         val destLat = EditText(this).apply {
             hint = "目的地纬度（例如 30.662）"
             setText("30.662")

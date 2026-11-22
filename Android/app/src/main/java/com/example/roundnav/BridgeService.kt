@@ -37,6 +37,7 @@ class BridgeService : Service() {
         const val ACTION_SEND_COMMAND = "com.example.roundnav.SEND_COMMAND"
         const val ACTION_SEND_BATCH = "com.example.roundnav.SEND_BATCH"
         const val ACTION_FETCH_ROADS = "com.example.roundnav.FETCH_ROADS"
+        const val ACTION_TEST_ROADS = "com.example.roundnav.TEST_ROADS"
         const val EXTRA_LINE = "line"
         const val EXTRA_LINES = "lines"
         @Volatile var latestLocation: Location? = null
@@ -84,6 +85,9 @@ class BridgeService : Service() {
     private var forceRoadRefresh = false
     private var requestGeneration = 0
     private var nextRoadRequestMs = 0L
+    private var lastObservedLocation: Location? = null
+    private var testMapLocation: Location? = null
+    private var lastRoadWaitReason: String? = null
     private val reconnect = Runnable { if (running) startScan() }
     private val scanTimeout = Runnable {
         if (scanning) {
@@ -99,7 +103,9 @@ class BridgeService : Service() {
         override fun run() {
             if (!running) return
             val location = latestLocation
-            if (location != null && !isFresh(location)) status = status.copy(location = "定位已过期，等待新定位")
+            if (location != null && !isFresh(location)) {
+                status = status.copy(location = "${locationDetails(location)}；等待新定位")
+            }
             maybeFetchRoads()
             handler.postDelayed(this, 1_000)
         }
@@ -161,7 +167,8 @@ class BridgeService : Service() {
                 txCharacteristic = characteristic
                 handler.removeCallbacks(connectionTimeout)
                 status = status.copy(bluetooth = "RoundNav 已就绪", roads = "等待有效定位后自动加载道路")
-                latestLocation?.takeIf(::isFresh)?.let { queueGps(it) }
+                Log.i(TAG, "BLE READY payloadLimit=$payloadLimit")
+                currentMapLocation()?.let { queueGps(it) }
                 drainQueue()
                 maybeFetchRoads()
             }
@@ -227,6 +234,17 @@ class BridgeService : Service() {
             handler.post(followTick)
         }
         when (intent?.action) {
+            ACTION_START -> {
+                if (testMapLocation != null) switchMapLocation(null)
+                startGps()
+            }
+            ACTION_TEST_ROADS -> {
+                val point = Location("ningbo-test").apply {
+                    latitude = 29.8683
+                    longitude = 121.5440
+                }
+                switchMapLocation(point)
+            }
             ACTION_SEND_COMMAND -> intent.getStringExtra(EXTRA_LINE)?.let { enqueueLine(it) }
             ACTION_SEND_BATCH -> intent.getStringArrayListExtra(EXTRA_LINES)?.let { enqueueBatch(it) }
             ACTION_FETCH_ROADS -> {
@@ -394,26 +412,66 @@ class BridgeService : Service() {
             location.accuracy <= RoadMap.MAX_LOCATION_ACCURACY_M
     }
 
+    private fun locationDetails(location: Location): String {
+        val ageMs = SystemClock.elapsedRealtime() - location.elapsedRealtimeNanos / 1_000_000L
+        val accuracy = if (location.hasAccuracy()) "${location.accuracy.roundToInt()}米" else "未知"
+        return "${location.provider} · 精度 $accuracy · ${(ageMs / 1000).coerceAtLeast(0)}秒前"
+    }
+
+    private fun currentMapLocation(): Location? = testMapLocation ?: latestLocation?.takeIf(::isFresh)
+
+    private fun switchMapLocation(testPoint: Location?) {
+        testMapLocation = testPoint
+        requestGeneration++
+        fetchingRoads = false
+        sendingRoads = false
+        pendingWrites.clear()
+        pendingGps = null
+        loadedCenter = null
+        nextRoadRequestMs = 0
+        forceRoadRefresh = true
+        currentMapLocation()?.let(::queueGps)
+        Log.i(TAG, if (testPoint != null) "MAP MODE Ningbo fixed test point" else "MAP MODE live location")
+        maybeFetchRoads()
+    }
+
+    private fun roadWait(reason: String) {
+        status = status.copy(roads = reason)
+        if (lastRoadWaitReason != reason) {
+            Log.i(TAG, "ROAD WAIT $reason")
+            lastRoadWaitReason = reason
+        }
+    }
+
     private fun startGps() {
         val lm = locationManager ?: return
         try {
+            lm.removeUpdates(locationListener)
             var registered = false
             for (provider in listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)) {
                 if (lm.isProviderEnabled(provider)) {
-                    lm.requestLocationUpdates(provider, 1_000L, 1f, locationListener, Looper.getMainLooper())
+                    lm.requestLocationUpdates(provider, 1_000L, 0f, locationListener, Looper.getMainLooper())
                     registered = true
                 }
+                Log.i(TAG, "LOCATION PROVIDER $provider enabled=${lm.isProviderEnabled(provider)}")
             }
             status = status.copy(location = if (registered) "等待精度 50 米以内的新定位" else "请打开手机定位")
             listOfNotNull(lm.getLastKnownLocation(LocationManager.GPS_PROVIDER), lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER))
-                .filter(::isFresh).maxByOrNull { it.elapsedRealtimeNanos }?.let(::processLocation)
-        } catch (e: Exception) { status = status.copy(location = "定位启动失败：${e.message}") }
+                .sortedBy { it.elapsedRealtimeNanos }.forEach(::processLocation)
+        } catch (e: Exception) {
+            Log.e(TAG, "LOCATION START failed", e)
+            status = status.copy(location = "定位启动失败：${e.message}")
+        }
     }
 
     private fun processLocation(location: Location) {
         if (!running) return
+        lastObservedLocation = Location(location)
+        Log.i(TAG, "LOCATION RX ${locationDetails(location)} accepted=${isFresh(location)}")
         if (!isFresh(location)) {
-            if (latestLocation?.let(::isFresh) != true) status = status.copy(location = "定位过旧或精度不足，等待 GPS")
+            if (latestLocation?.let(::isFresh) != true) {
+                status = status.copy(location = "${locationDetails(location)}；需15秒内、精度≤50米，请到室外等待")
+            }
             return
         }
         val last = latestLocation
@@ -435,18 +493,26 @@ class BridgeService : Service() {
         lastBearing = ((bearing % 360) + 360) % 360
         previousLocation = Location(location)
         lastGpsSentElapsedMs = now
+        if (testMapLocation != null) return
         queueGps(location)
         maybeFetchRoads()
     }
 
     private fun queueGps(location: Location) {
         pendingGps = Write("G,${(location.latitude * 1e6).roundToInt()},${(location.longitude * 1e6).roundToInt()},$lastBearing")
+        Log.d(TAG, "GPS TX queued provider=${location.provider}")
         drainQueue()
     }
 
     private fun maybeFetchRoads() {
-        if (!running || txCharacteristic == null || fetchingRoads || sendingRoads) return
-        val current = latestLocation?.takeIf(::isFresh) ?: return
+        if (!running) return
+        if (txCharacteristic == null) { roadWait("等待蓝牙数据通道就绪"); return }
+        if (fetchingRoads || sendingRoads) return
+        val current = currentMapLocation()
+        if (current == null) {
+            roadWait(if (lastObservedLocation == null) "尚未收到定位，等待 GPS" else "定位未达标（15秒内、精度≤50米）；可用宁波固定点测试显示")
+            return
+        }
         val now = SystemClock.elapsedRealtime()
         if (now < nextRoadRequestMs) return
         val center = loadedCenter
@@ -457,6 +523,9 @@ class BridgeService : Service() {
         val origin = Location(current)
         nextRoadRequestMs = now + RoadMap.MIN_REQUEST_INTERVAL_MS
         status = status.copy(roads = "正在获取附近 ${RoadMap.DOWNLOAD_RADIUS_M.toInt()} 米道路")
+        lastRoadWaitReason = null
+        val testMode = testMapLocation != null
+        Log.i(TAG, "ROAD REQUEST mode=${if (testMode) "ningbo-test" else "live"} radius=${RoadMap.DOWNLOAD_RADIUS_M}")
         RoadApi.fetchNearby(origin.latitude, origin.longitude, RoadMap.DOWNLOAD_RADIUS_M) { roads, error ->
             handler.post {
                 if (!running || generation != requestGeneration) return@post
@@ -468,7 +537,7 @@ class BridgeService : Service() {
                     forceRoadRefresh = true
                     return@post
                 }
-                val latest = latestLocation?.takeIf(::isFresh)
+                val latest = currentMapLocation()
                 if (latest == null || origin.distanceTo(latest) > 150f) {
                     forceRoadRefresh = true
                     status = status.copy(roads = "位置已变化，重新获取附近道路")
@@ -478,10 +547,11 @@ class BridgeService : Service() {
                 val commands = RoadMap.commands(roads, origin.latitude, origin.longitude)
                 val count = commands.first().substringAfter(',').toInt()
                 status = status.copy(roads = "正在发送 $count 条道路；GPS 持续跟随")
-                if (!enqueueBatch(commands) {
+                if (!enqueueBatch(commands) onSent@{
+                        if (generation != requestGeneration) return@onSent
                         sendingRoads = false
                         loadedCenter = origin
-                        status = status.copy(roads = "已发送 $count 条道路 · 移动约 75 米自动补加载")
+                        status = status.copy(roads = if (testMode) "宁波固定点测试：已发送 $count 条道路（非当前位置）；点启动恢复实时" else "已发送 $count 条道路 · 移动约 75 米自动补加载")
                         Log.i(TAG, "Road snapshot sent: roads=$count commands=${commands.size}")
                         maybeFetchRoads()
                     }) {
@@ -501,6 +571,9 @@ class BridgeService : Service() {
         resetConnection("已停止")
         previousLocation = null
         latestLocation = null
+        lastObservedLocation = null
+        testMapLocation = null
+        lastRoadWaitReason = null
         status = BridgeStatus(bluetooth = "已停止", location = "已停止", roads = "已停止自动地图")
     }
 
