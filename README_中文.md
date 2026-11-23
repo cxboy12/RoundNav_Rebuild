@@ -114,21 +114,20 @@ RoundNav_Rebuild/
 ## 2. 已知硬件和软件目标
 
 - 开发板：Waveshare ESP32-S3-Touch-AMOLED-1.75，466×466 CO5300 AMOLED、CST9217 触摸。
-- ESP-IDF：5.5.5；芯片目标：`esp32s3`；PSRAM：8 MB Octal。
+- 固件使用 ESP-IDF 5.5.6，目标为 `esp32s3`，PSRAM 为 8 MB Octal。
 - Android：包名 `com.example.roundnav`，最低 Android 8.0（API 26），目标 SDK 35。
 - BLE 名称：`RoundNav`。
 - 地图服务：保留 150 米附近道路半径；每批最多 40 条道路、每条道路最多 80 个点。
 
 ## 3. ESP32 工程编译
 
-先在 Windows 解压整个文件夹。打开已配置好 ESP-IDF 5.5.5 的 PowerShell，进入 `ESP32` 目录：
+打开已配置好 ESP-IDF 5.5.6 的 PowerShell，进入项目的 `ESP32` 目录。首次配置或切换芯片目标时运行 `idf.py set-target esp32s3`，日常编译执行以下命令。
 
 ```powershell
-cd <解压目录>\RoundNav_Rebuild\ESP32
-idf.py set-target esp32s3
-idf.py reconfigure
 idf.py build
 ```
+
+VS Code 的 ESP-IDF 路径和 PowerShell 的 `$env:IDF_PATH` 应指向同一个安装目录。CMake 会在 bootloader 缓存中记录 SDK 的绝对路径，即使切换到同版本的另一份安装也会发生冲突。切换目录后，如果构建提示 bootloader 的 `source ... does not match ... used to generate cache`，先选定要使用的 SDK，再在 `ESP32` 下运行 `idf.py fullclean` 清理生成的构建目录，然后运行 `idf.py build`。
 
 烧录到 COM3 并打开日志：
 

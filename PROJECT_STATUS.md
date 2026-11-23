@@ -33,6 +33,7 @@
 - ADB 未发现手机，待上机验证地图、真实定位的权限与时效检查、手机发包以及两屏的路线形状与位置。圆屏以设备位置为中心显示附近约 150 米，联合验收时对比手机地图中对应的局部路段。
 - 锁屏、断网恢复、蓝牙断线后完整路线同步，以及真实骑行定位仍需验收。
 - 本机 Android 调试构建入口为 `Android/gradlew.bat :app:assembleDebug`，产物为 `Android/app/build/outputs/apk/debug/app-debug.apk`。已有几何与协议容量检查入口 `tests/run_map_checks.ps1`，依赖调试编译结果及 JDK。固件从 `ESP32/` 使用 ESP-IDF 构建，产物为 `ESP32/build/roundnav.bin`。产物不纳入 Git。
+- 2026-11-23 复验 Windows 构建。命令行与 VS Code 使用了同版本 ESP-IDF 的不同目录，导致 bootloader 缓存路径冲突。按 VS Code 选定的 SDK 重新生成 bootloader 缓存后，Ninja 完成构建并生成 `roundnav.bin`。重建后的产物未烧录。
 
 ## 下一步
 
