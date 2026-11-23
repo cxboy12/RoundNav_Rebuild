@@ -16,6 +16,7 @@ import android.os.ResultReceiver
 import android.text.method.LinkMovementMethod
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -25,7 +26,6 @@ import androidx.core.content.ContextCompat
 import androidx.core.text.HtmlCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.doOnLayout
 import org.osmdroid.config.Configuration
 import org.osmdroid.events.MapEventsReceiver
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
@@ -39,6 +39,7 @@ import org.osmdroid.views.overlay.Polyline
 import org.osmdroid.tileprovider.MapTileProviderBase
 import java.io.File
 import java.util.Locale
+import java.util.UUID
 import kotlin.math.roundToLong
 
 class MapActivity : ComponentActivity() {
@@ -46,7 +47,12 @@ class MapActivity : ComponentActivity() {
         internal const val EXTRA_ROUTE_PREVIEW = "routePreview"
     }
 
-    private data class Preview(val route: RouteResult, val origin: GeoPoint, val indoor: Boolean)
+    private data class Preview(
+        val route: RouteResult,
+        val origin: GeoPoint,
+        val indoor: Boolean,
+        val id: String = UUID.randomUUID().toString()
+    )
 
     private lateinit var map: MapView
     private lateinit var locationStatus: TextView
@@ -61,6 +67,20 @@ class MapActivity : ComponentActivity() {
     private lateinit var routeStatus: TextView
     private lateinit var sendStatus: TextView
     private lateinit var sendButton: Button
+    private lateinit var playbackControls: LinearLayout
+    private lateinit var playbackButton: Button
+    private lateinit var speedButton: Button
+    private lateinit var playbackInfo: TextView
+    private lateinit var playbackMarker: Marker
+    private var playbackSpeed = 10
+    private var isSending = false
+    private val playbackHandler = Handler(Looper.getMainLooper())
+    private val playbackTick = object : Runnable {
+        override fun run() {
+            showPlayback()
+            playbackHandler.postDelayed(this, 500)
+        }
+    }
     private var selected: GeoPoint? = null
     private var phoneLocation: Location? = null
     private var routeLocation: Location? = null
@@ -68,6 +88,7 @@ class MapActivity : ComponentActivity() {
     private var preview: Preview? = null
     private var requestId = 0
     private var followPhone = false
+    private var keepRouteInView = false
     private var referenceView = false
     private val tileMessages = Handler(Looper.getMainLooper()) { message ->
         tileStatus.text = when (message.what) {
@@ -93,6 +114,7 @@ class MapActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         routePreviewMode = intent.getBooleanExtra(EXTRA_ROUTE_PREVIEW, false)
+        playbackSpeed = savedInstanceState?.getInt("playbackSpeed", 10) ?: 10
         Configuration.getInstance().apply {
             userAgentValue = "RoundNav/" + BuildConfig.VERSION_NAME + " (+https://github.com/cxboy12/RoundNav_Rebuild)"
             osmdroidBasePath = File(filesDir, "maps")
@@ -127,6 +149,7 @@ class MapActivity : ComponentActivity() {
             text = "回到当前位置"
             setOnClickListener {
                 followPhone = true
+                keepRouteInView = false
                 referenceView = false
                 if (!hasLocationPermission()) {
                     permission.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
@@ -144,6 +167,7 @@ class MapActivity : ComponentActivity() {
             text = "宁波室内参考点"
             setOnClickListener {
                 followPhone = false
+                keepRouteInView = false
                 referenceView = true
                 map.controller.setZoom(16.0)
                 map.controller.animateTo(ningboOrigin())
@@ -162,9 +186,15 @@ class MapActivity : ComponentActivity() {
                 savedInstanceState?.getDouble("centerLon") ?: BridgeService.NINGBO_TEST_LON
             ))
             setOnTouchListener { _, event ->
-                if (event.actionMasked == MotionEvent.ACTION_DOWN) followPhone = false
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    followPhone = false
+                    keepRouteInView = false
+                }
                 false
             }
+        }
+        map.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+            if (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop) fitVisibleRoute()
         }
         map.overlays.add(MapEventsOverlay(object : MapEventsReceiver {
             override fun singleTapConfirmedHelper(p: GeoPoint) = false
@@ -206,6 +236,16 @@ class MapActivity : ComponentActivity() {
         }
         map.overlays.add(position)
         map.overlays.add(destination)
+        if (routePreviewMode) {
+            playbackMarker = Marker(map).apply {
+                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                title = "室内模拟位置"
+                icon = getDrawable(android.R.drawable.ic_menu_mylocation)?.mutate()
+                    ?.apply { setTint(Color.rgb(226, 112, 0)) }
+                isEnabled = false
+            }
+            map.overlays.add(playbackMarker)
+        }
         root.addView(map, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(TextView(this).apply {
             text = HtmlCompat.fromHtml("© <a href=\"https://www.openstreetmap.org/copyright\">OpenStreetMap contributors</a>", HtmlCompat.FROM_HTML_MODE_LEGACY)
@@ -239,6 +279,7 @@ class MapActivity : ComponentActivity() {
             select(GeoPoint(intent.getDoubleExtra("latitude", 29.875), intent.getDoubleExtra("longitude", 121.55)))
         } else if (saved != null) select(GeoPoint(saved.latitude, saved.longitude))
         followPhone = savedInstanceState?.getBoolean("followPhone") ?: !routePreviewMode
+        keepRouteInView = savedInstanceState?.getBoolean("keepRouteInView") ?: false
         referenceView = savedInstanceState?.getBoolean("referenceView") ?: false
         if (referenceView) locationStatus.text = "宁波室内参考点 · 非手机位置"
         savedInstanceState?.getDoubleArray("routeCoordinates")?.let { coordinates ->
@@ -248,7 +289,8 @@ class MapActivity : ComponentActivity() {
                 savedInstanceState.getDouble("routeDuration", Double.NaN).takeIf { it.isFinite() }
             )
             val origin = GeoPoint(savedInstanceState.getDouble("routeOriginLat"), savedInstanceState.getDouble("routeOriginLon"))
-            showPreview(Preview(route, origin, savedInstanceState.getBoolean("routeIndoor")), fit = false)
+            showPreview(Preview(route, origin, savedInstanceState.getBoolean("routeIndoor"),
+                savedInstanceState.getString("previewId") ?: UUID.randomUUID().toString()), fit = false)
         }
     }
 
@@ -283,18 +325,40 @@ class MapActivity : ComponentActivity() {
             setOnClickListener { sendPreview() }
         }
         root.addView(sendButton)
+        playbackInfo = TextView(this).apply { visibility = View.GONE }
+        root.addView(playbackInfo)
+        playbackControls = LinearLayout(this).apply { visibility = View.GONE }
+        playbackButton = Button(this).apply { setOnClickListener { togglePlayback() } }
+        speedButton = Button(this).apply {
+            setOnClickListener {
+                playbackSpeed = if (playbackSpeed == 15) 5 else playbackSpeed + 5
+                val current = preview ?: return@setOnClickListener
+                val phase = BridgeService.playbackStatus?.takeIf { it.id == current.id }?.phase
+                if (phase == PlaybackPhase.RUNNING || phase == PlaybackPhase.PAUSED) {
+                    BridgeService.controlPlayback(this@MapActivity, current.id, BridgeService.ACTION_PLAYBACK_SPEED, playbackSpeed)
+                }
+                showPlayback()
+            }
+        }
+        playbackControls.addView(playbackButton, LinearLayout.LayoutParams(0, -2, 1f))
+        playbackControls.addView(speedButton, LinearLayout.LayoutParams(0, -2, 1f))
+        root.addView(playbackControls)
     }
 
     private fun ningboOrigin() = GeoPoint(BridgeService.NINGBO_TEST_LAT, BridgeService.NINGBO_TEST_LON)
 
     private fun clearPreview(message: String) {
         requestId++
+        endPlayback()
         preview = null
+        keepRouteInView = false
+        isSending = false
         originMarker.isEnabled = false
         routeLine.isEnabled = false
         sendButton.isEnabled = false
         routeStatus.text = message
         sendStatus.text = ""
+        showPlayback()
         map.invalidate()
     }
 
@@ -341,39 +405,121 @@ class MapActivity : ComponentActivity() {
         } ?: "时间未知"
         routeStatus.text = String.format(Locale.CHINA, "%s  %.6f, %.6f\n%s · %s",
             originMarker.title, value.origin.latitude, value.origin.longitude, distance, duration)
-        sendButton.isEnabled = true
+        showPlayback()
         if (fit) {
             followPhone = false
-            val bounds = BoundingBox.fromGeoPoints(points + value.origin + listOfNotNull(selected))
-            map.doOnLayout {
-                if (preview !== value) return@doOnLayout
-                if (bounds.latitudeSpan == 0.0) bounds.latSouth = (bounds.latSouth - 0.0001).coerceAtLeast(-90.0)
-                if (bounds.longitudeSpanWithDateLine == 0.0) bounds.lonWest = (bounds.lonWest - 0.0001).coerceAtLeast(-180.0)
-                map.zoomToBoundingBox(bounds, false, dp(28))
-            }
+            keepRouteInView = true
+            map.post { fitVisibleRoute() }
         }
         map.invalidate()
     }
 
+    private fun fitVisibleRoute() {
+        val value = preview?.takeIf { keepRouteInView } ?: return
+        val padding = dp(28)
+        if (map.height <= 2 * padding || map.width <= 2 * padding) return
+        val points = value.route.coordinates.map { (lon, lat) -> GeoPoint(lat, lon) }
+        val bounds = BoundingBox.fromGeoPoints(points + value.origin + listOfNotNull(selected))
+        if (bounds.latitudeSpan == 0.0) bounds.latSouth = (bounds.latSouth - 0.0001).coerceAtLeast(-90.0)
+        if (bounds.longitudeSpanWithDateLine == 0.0) bounds.lonWest = (bounds.lonWest - 0.0001).coerceAtLeast(-180.0)
+        map.zoomToBoundingBox(bounds, false, padding)
+    }
+
     private fun sendPreview() {
         val value = preview ?: return
-        sendButton.isEnabled = false
+        isSending = true
+        showPlayback()
         sendStatus.text = "正在提交到蓝牙服务…"
         val receiver = object : ResultReceiver(Handler(Looper.getMainLooper())) {
             override fun onReceiveResult(resultCode: Int, resultData: Bundle?) {
                 if (isDestroyed || isFinishing || preview !== value) return
                 sendStatus.text = resultData?.getString("message")
-                sendButton.isEnabled = resultCode != BridgeService.ROUTE_QUEUED
+                isSending = resultCode == BridgeService.ROUTE_QUEUED
+                showPlayback()
             }
         }
         try {
             BridgeService.sendRoute(this, value.route, value.indoor, receiver)
         } catch (_: IllegalStateException) {
             sendStatus.text = "无法启动蓝牙服务，请在首页启动后重试"
-            sendButton.isEnabled = true
+            isSending = false
+            showPlayback()
         } catch (_: SecurityException) {
             sendStatus.text = "缺少蓝牙或定位权限，请在首页授权后重试"
-            sendButton.isEnabled = true
+            isSending = false
+            showPlayback()
+        }
+    }
+
+    private fun togglePlayback() {
+        val value = preview?.takeIf { it.indoor } ?: return
+        if (!BridgeService.status.bluetoothReady) {
+            sendStatus.text = "请先在首页连接圆屏，等待 RoundNav 就绪"
+            return
+        }
+        sendStatus.text = ""
+        when (BridgeService.playbackStatus?.takeIf { it.id == value.id }?.phase) {
+            PlaybackPhase.RUNNING, PlaybackPhase.PAUSED ->
+                BridgeService.controlPlayback(this, value.id, BridgeService.ACTION_TOGGLE_PLAYBACK)
+            PlaybackPhase.UPLOADING -> return
+            else -> BridgeService.startPlayback(this, value.id, value.route, playbackSpeed)
+        }
+        followPhone = false
+        playbackButton.isEnabled = false
+    }
+
+    private fun endPlayback() {
+        val current = preview ?: return
+        if (BridgeService.playbackStatus?.id == current.id) {
+            BridgeService.controlPlayback(this, current.id, BridgeService.ACTION_END_PLAYBACK)
+        }
+    }
+
+    private fun showPlayback() {
+        val current = preview
+        val replay = BridgeService.playbackStatus?.takeIf { current?.id == it.id }
+        val moving = replay?.phase == PlaybackPhase.RUNNING || replay?.phase == PlaybackPhase.UPLOADING
+        val active = moving || replay?.phase == PlaybackPhase.PAUSED
+        playbackControls.visibility = if (current?.indoor == true) View.VISIBLE else View.GONE
+        sendButton.isEnabled = current != null && !isSending && !active
+        playbackButton.isEnabled = !isSending && replay?.phase != PlaybackPhase.UPLOADING
+        speedButton.isEnabled = replay?.phase != PlaybackPhase.UPLOADING
+        val speedLabel = "${(playbackSpeed * 3.6).toInt()} 公里/小时"
+        if (speedButton.text != speedLabel) speedButton.text = speedLabel
+        val buttonLabel = when (replay?.phase) {
+            PlaybackPhase.UPLOADING -> "正在发送路线…"
+            PlaybackPhase.RUNNING -> "暂停模拟"
+            PlaybackPhase.PAUSED -> "继续模拟"
+            PlaybackPhase.FINISHED, PlaybackPhase.FAILED -> "从起点重播"
+            null -> "开始沿线模拟"
+        }
+        if (playbackButton.text != buttonLabel) playbackButton.text = buttonLabel
+        val phaseText = when (replay?.phase) {
+            PlaybackPhase.UPLOADING -> "发送预览路线后开始模拟"
+            PlaybackPhase.RUNNING -> "模拟行驶"
+            PlaybackPhase.PAUSED -> "模拟暂停"
+            PlaybackPhase.FINISHED -> "模拟已到达"
+            PlaybackPhase.FAILED -> replay.message
+            null -> ""
+        }
+        playbackInfo.visibility = if (replay == null) View.GONE else View.VISIBLE
+        playbackInfo.keepScreenOn = moving
+        val point = replay?.point
+        val details = if (point == null) phaseText else {
+            val progress = "${replay.traveledMeters.roundToLong()} / ${replay.totalMeters.roundToLong()} 米"
+            "$phaseText · $progress\n${BridgeService.status.roads}"
+        }
+        if (playbackInfo.text != details) playbackInfo.text = details
+        if (point != null) {
+            val next = GeoPoint(point.latitude, point.longitude)
+            if (!playbackMarker.isEnabled || playbackMarker.position != next) {
+                playbackMarker.position = next
+                playbackMarker.isEnabled = true
+                map.invalidate()
+            }
+        } else if (playbackMarker.isEnabled) {
+            playbackMarker.isEnabled = false
+            map.invalidate()
         }
     }
 
@@ -423,9 +569,20 @@ class MapActivity : ComponentActivity() {
         }
     }
 
-    override fun onResume() { super.onResume(); map.onResume(); startLocations() }
-    override fun onPause() { locations.removeUpdates(listener); map.onPause(); super.onPause() }
+    override fun onResume() {
+        super.onResume()
+        map.onResume()
+        startLocations()
+        if (routePreviewMode) playbackHandler.post(playbackTick)
+    }
+    override fun onPause() {
+        playbackHandler.removeCallbacks(playbackTick)
+        locations.removeUpdates(listener)
+        map.onPause()
+        super.onPause()
+    }
     override fun onDestroy() {
+        if (isFinishing) endPlayback()
         map.tileProvider.tileRequestCompleteHandlers.remove(tileMessages)
         tileMessages.removeCallbacksAndMessages(null)
         map.onDetach()
@@ -436,7 +593,9 @@ class MapActivity : ComponentActivity() {
         out.putDouble("centerLon", map.mapCenter.longitude)
         out.putDouble("zoom", map.zoomLevelDouble)
         out.putBoolean("followPhone", followPhone)
+        out.putBoolean("keepRouteInView", keepRouteInView)
         out.putBoolean("referenceView", referenceView)
+        out.putInt("playbackSpeed", playbackSpeed)
         selected?.let { out.putDouble("selectedLat", it.latitude); out.putDouble("selectedLon", it.longitude) }
         preview?.let { value ->
             out.putDoubleArray("routeCoordinates", value.route.coordinates.flatMap { listOf(it.first, it.second) }.toDoubleArray())
@@ -445,6 +604,7 @@ class MapActivity : ComponentActivity() {
             out.putDouble("routeOriginLat", value.origin.latitude)
             out.putDouble("routeOriginLon", value.origin.longitude)
             out.putBoolean("routeIndoor", value.indoor)
+            out.putString("previewId", value.id)
         }
         super.onSaveInstanceState(out)
     }

@@ -34,6 +34,28 @@ public final class RoadMapChecks {
         verify(map.needsRefresh(lat + 0.0008, lon, lat, lon), "Movement beyond 75 m fetches coverage");
         verify(Math.abs(map.distanceMeters(lat, lon, lat + 0.001, lon) - 111.31949) < 0.01, "Latitude distance is in metres");
 
+        double north = lat + .001;
+        double east = lon + .001;
+        RoutePlayback playback = new RoutePlayback(road("route", lon, lat, lon, lat, lon, north, east, north).getPoints());
+        double cornerDistance = map.distanceMeters(lat, lon, north, lon);
+        PlaybackPoint start = playback.pointAt(-5);
+        verify(start.getLatitude() == lat && start.getLongitude() == lon && start.getBearing() == 0,
+            "Playback starts at the first route point after skipping a duplicate");
+        PlaybackPoint beforeTurn = playback.pointAt(cornerDistance / 2);
+        verify(Math.abs(beforeTurn.getLatitude() - (lat + north) / 2) < 1e-10 &&
+            beforeTurn.getLongitude() == lon && beforeTurn.getBearing() == 0,
+            "Playback advances by metres along the first road");
+        PlaybackPoint turn = playback.pointAt(cornerDistance);
+        PlaybackPoint afterTurn = playback.pointAt((cornerDistance + playback.getTotalMeters()) / 2);
+        verify(turn.getLatitude() == north && turn.getLongitude() == lon && turn.getBearing() == 90 &&
+            afterTurn.getLatitude() == north && Math.abs(afterTurn.getLongitude() - (lon + east) / 2) < 1e-10,
+            "Playback follows the route around a corner and updates its heading");
+        PlaybackPoint end = playback.pointAt(playback.getTotalMeters() + 15);
+        verify(end.getLatitude() == north && end.getLongitude() == east && end.getBearing() == 90,
+            "Playback stops at the last route point even when a step overshoots");
+        verify(new RoutePlayback(road("same point", lon, lat, lon, lat).getPoints()).getTotalMeters() == 0,
+            "A route with no movement has zero playback length");
+
         NearbyRoad crossing = road("crossing", lon - .003, lat, lon + .003, lat);
         NearbyRoad nearby = road("nearby", lon + .001, lat, lon + .001, lat + .001);
         List<NearbyRoad> selected = map.selectRoads(Arrays.asList(nearby, crossing), lat, lon);

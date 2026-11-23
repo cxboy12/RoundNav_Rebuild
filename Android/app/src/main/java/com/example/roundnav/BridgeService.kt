@@ -26,7 +26,8 @@ import kotlin.math.roundToInt
 internal data class BridgeStatus(
     val bluetooth: String = "未启动",
     val location: String = "等待定位",
-    val roads: String = "连接后自动加载附近道路"
+    val roads: String = "连接后自动加载附近道路",
+    val bluetoothReady: Boolean = false
 )
 
 class BridgeService : Service() {
@@ -45,6 +46,13 @@ class BridgeService : Service() {
         private const val ACTION_SEND_ROUTE = "com.example.roundnav.SEND_ROUTE"
         private const val EXTRA_INDOOR = "indoor"
         private const val EXTRA_ROUTE_STATUS = "routeStatus"
+        private const val ACTION_START_PLAYBACK = "com.example.roundnav.START_PLAYBACK"
+        internal const val ACTION_TOGGLE_PLAYBACK = "com.example.roundnav.TOGGLE_PLAYBACK"
+        internal const val ACTION_PLAYBACK_SPEED = "com.example.roundnav.PLAYBACK_SPEED"
+        internal const val ACTION_END_PLAYBACK = "com.example.roundnav.END_PLAYBACK"
+        private const val EXTRA_PLAYBACK_ID = "playbackId"
+        private const val EXTRA_PLAYBACK_POINTS = "playbackPoints"
+        private const val EXTRA_PLAYBACK_SPEED = "playbackSpeed"
         internal const val ROUTE_QUEUED = 1
         internal const val NINGBO_TEST_LAT = 29.8683
         internal const val NINGBO_TEST_LON = 121.5440
@@ -52,6 +60,8 @@ class BridgeService : Service() {
         const val EXTRA_LINES = "lines"
         @Volatile var latestLocation: Location? = null
         @Volatile internal var status = BridgeStatus()
+            private set
+        @Volatile internal var playbackStatus: PlaybackStatus? = null
             private set
         private val SERVICE_UUID = UUID.fromString("6e400001-b5a3-f393-e0a9-e50e24dcca9e")
         private val RX_UUID = UUID.fromString("6e400002-b5a3-f393-e0a9-e50e24dcca9e")
@@ -70,6 +80,22 @@ class BridgeService : Service() {
                 .putStringArrayListExtra(EXTRA_LINES, RouteApi.toBleCommands(route))
                 .putExtra(EXTRA_INDOOR, indoor)
                 .putExtra(EXTRA_ROUTE_STATUS, receiver))
+        }
+
+        internal fun startPlayback(context: Context, id: String, route: RouteResult, speed: Int) {
+            val points = route.coordinates.flatMap { (lon, lat) -> listOf(lon, lat) }.toDoubleArray()
+            context.startService(Intent(context, BridgeService::class.java)
+                .setAction(ACTION_START_PLAYBACK)
+                .putExtra(EXTRA_PLAYBACK_ID, id)
+                .putExtra(EXTRA_PLAYBACK_POINTS, points)
+                .putExtra(EXTRA_PLAYBACK_SPEED, speed))
+        }
+
+        internal fun controlPlayback(context: Context, id: String, action: String, speed: Int = 0) {
+            context.startService(Intent(context, BridgeService::class.java)
+                .setAction(action)
+                .putExtra(EXTRA_PLAYBACK_ID, id)
+                .putExtra(EXTRA_PLAYBACK_SPEED, speed))
         }
         fun sendCommand(context: Context, line: String) {
             context.startForegroundService(Intent(context, BridgeService::class.java)
@@ -112,9 +138,14 @@ class BridgeService : Service() {
     private var nextRoadRequestMs = 0L
     private var lastObservedLocation: Location? = null
     private var testMapLocation: Location? = null
-    private enum class MapMode { LIVE, COARSE, FIXED, SIMULATION }
+    private enum class MapMode { LIVE, COARSE, FIXED, SIMULATION, ROUTE_PLAYBACK }
     private var mapMode = MapMode.LIVE
     private var simulationStep = 0L
+    private class Playback(val id: String, val path: RoutePlayback, var speed: Int) {
+        var traveled = 0.0
+        var lastTick: Long? = null
+    }
+    private var playback: Playback? = null
     private val locationAgeLimit: Long get() = if (mapMode == MapMode.COARSE) 60_000L else RoadMap.MAX_LOCATION_AGE_MS
     private val locationAccuracyLimit: Float get() = if (mapMode == MapMode.COARSE) 1_000f else RoadMap.MAX_LOCATION_ACCURACY_M
     private var lastRoadWaitReason: String? = null
@@ -142,6 +173,7 @@ class BridgeService : Service() {
                 queueGps(testMapLocation!!)
                 status = status.copy(location = "模拟移动 · 5米/秒南北往返 · 非手机位置")
             }
+            playback?.let { advancePlayback(it, SystemClock.uptimeMillis()) }
             val location = latestLocation
             if (testMapLocation == null && location != null && !isFresh(location)) {
                 status = status.copy(location = "${locationDetails(location)}；等待新定位")
@@ -206,7 +238,7 @@ class BridgeService : Service() {
                 characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
                 txCharacteristic = characteristic
                 handler.removeCallbacks(connectionTimeout)
-                status = status.copy(bluetooth = "RoundNav 已就绪", roads = "等待有效定位后自动加载道路")
+                status = status.copy(bluetooth = "RoundNav 已就绪", roads = "等待有效定位后自动加载道路", bluetoothReady = true)
                 Log.i(TAG, "BLE READY payloadLimit=$payloadLimit")
                 currentMapLocation()?.let { queueGps(it) }
                 drainQueue()
@@ -251,6 +283,32 @@ class BridgeService : Service() {
             IntentCompat.getParcelableExtra(intent, EXTRA_ROUTE_STATUS, ResultReceiver::class.java)?.let { receiver ->
                 sendPreview(intent.getStringArrayListExtra(EXTRA_LINES).orEmpty(),
                     intent.getBooleanExtra(EXTRA_INDOOR, false), receiver)
+            }
+            if (!running) stopSelf(startId)
+            return if (running) START_STICKY else START_NOT_STICKY
+        }
+        if (intent != null && intent.hasExtra(EXTRA_PLAYBACK_ID)) {
+            val id = intent.getStringExtra(EXTRA_PLAYBACK_ID)
+            val speed = intent.getIntExtra(EXTRA_PLAYBACK_SPEED, 0)
+            if (running && id != null) {
+                when (intent.action) {
+                    ACTION_START_PLAYBACK -> beginPlayback(id, intent.getDoubleArrayExtra(EXTRA_PLAYBACK_POINTS), speed)
+                    ACTION_TOGGLE_PLAYBACK -> playback?.takeIf { it.id == id }?.let(::togglePlayback)
+                    ACTION_PLAYBACK_SPEED -> playback?.takeIf { it.id == id && speed in 5..15 }?.let {
+                        advancePlayback(it, SystemClock.uptimeMillis())
+                        it.speed = speed
+                    }
+                    ACTION_END_PLAYBACK -> if (playbackStatus?.id == id) {
+                        if (playbackStatus?.phase == PlaybackPhase.UPLOADING) {
+                            // Discard the partially queued route as well as the playback.
+                            switchMapLocation(testMapLocation, MapMode.ROUTE_PLAYBACK)
+                        } else {
+                            playback = null
+                            playbackStatus = null
+                            status = status.copy(location = "沿线模拟已结束 · 停留在模拟位置")
+                        }
+                    }
+                }
             }
             if (!running) stopSelf(startId)
             return if (running) START_STICKY else START_NOT_STICKY
@@ -363,6 +421,7 @@ class BridgeService : Service() {
 
     private fun resetConnection(message: String) {
         finishRouteSend("路线发送中断：$message。连接就绪后可重发")
+        playback?.let { failPlayback(it.id, "蓝牙已断开，连接就绪后可从起点重播") }
         handler.removeCallbacks(connectionTimeout)
         handler.removeCallbacks(reconnect)
         cancelWriteTimeout()
@@ -381,7 +440,7 @@ class BridgeService : Service() {
         loadedCenter = null
         nextRoadRequestMs = 0
         try { previousGatt?.disconnect(); previousGatt?.close() } catch (_: Exception) { }
-        status = status.copy(bluetooth = message, roads = "重连后重新同步附近道路")
+        status = status.copy(bluetooth = message, roads = "重连后重新同步附近道路", bluetoothReady = false)
         if (running) handler.postDelayed(reconnect, 1_500)
     }
 
@@ -425,6 +484,107 @@ class BridgeService : Service() {
             }
         }
         if (!queued) finishRouteSend("蓝牙队列繁忙或数据长度不足，请重试")
+    }
+
+    private fun beginPlayback(id: String, points: DoubleArray?, speed: Int) {
+        if (txCharacteristic == null || routeReceiver != null) {
+            failPlayback(id, "请等待蓝牙就绪及路线发送完成，再开始模拟")
+            return
+        }
+        if (points == null || points.size !in 4..1000 || points.size % 2 != 0 || speed !in 5..15) {
+            failPlayback(id, "无法模拟，路线数据无效")
+            return
+        }
+        val coordinates = List(points.size / 2) { points[it * 2] to points[it * 2 + 1] }
+        if (coordinates.any { (lon, lat) -> lat !in -90.0..90.0 || lon !in -180.0..180.0 }) {
+            failPlayback(id, "无法模拟，路线坐标无效")
+            return
+        }
+        val path = RoutePlayback(coordinates)
+        if (path.totalMeters <= 0.0) {
+            failPlayback(id, "起点和终点重合，请选择其他目的地")
+            return
+        }
+        switchMapLocation(Location("ningbo-route-origin").apply {
+            latitude = NINGBO_TEST_LAT
+            longitude = NINGBO_TEST_LON
+        }, MapMode.ROUTE_PLAYBACK)
+        if (txCharacteristic == null) {
+            failPlayback(id, "蓝牙已断开，连接就绪后可从起点重播")
+            return
+        }
+        val active = Playback(id, path, speed)
+        playback = active
+        playbackStatus = PlaybackStatus(id, PlaybackPhase.UPLOADING, totalMeters = path.totalMeters)
+        status = status.copy(location = "正在准备沿线模拟 · 非手机位置")
+        val commands = RouteApi.toBleCommands(RouteResult(coordinates, null, null))
+        val queued = enqueueBatch(commands) {
+            if (playback === active) {
+                Log.i(TAG, "Playback route ATT writes complete: points=${coordinates.size}")
+                active.lastTick = SystemClock.uptimeMillis()
+                publishPlayback(active, PlaybackPhase.RUNNING)
+            }
+        }
+        if (!queued) failPlayback(id, "蓝牙队列繁忙，请重试")
+    }
+
+    private fun togglePlayback(active: Playback) {
+        val now = SystemClock.uptimeMillis()
+        when (playbackStatus?.phase) {
+            PlaybackPhase.RUNNING -> {
+                advancePlayback(active, now)
+                if (playback === active) {
+                    active.lastTick = null
+                    publishPlayback(active, PlaybackPhase.PAUSED)
+                }
+            }
+            PlaybackPhase.PAUSED -> {
+                active.lastTick = now
+                publishPlayback(active, PlaybackPhase.RUNNING)
+            }
+            else -> Unit
+        }
+    }
+
+    private fun advancePlayback(active: Playback, now: Long) {
+        val last = active.lastTick ?: return
+        if (now <= last) return
+        active.lastTick = now
+        active.traveled = (active.traveled + (now - last) * active.speed / 1000.0).coerceAtMost(active.path.totalMeters)
+        if (active.traveled >= active.path.totalMeters) {
+            playback = null
+            publishPlayback(active, PlaybackPhase.FINISHED)
+            Log.i(TAG, "Route playback finished: meters=${active.traveled.roundToInt()}")
+        } else {
+            publishPlayback(active, PlaybackPhase.RUNNING)
+        }
+    }
+
+    private fun publishPlayback(active: Playback, phase: PlaybackPhase) {
+        val point = active.path.pointAt(active.traveled)
+        val location = Location("ningbo-route-playback").apply {
+            latitude = point.latitude
+            longitude = point.longitude
+        }
+        testMapLocation = location
+        lastBearing = point.bearing
+        playbackStatus = PlaybackStatus(active.id, phase, point, active.traveled, active.path.totalMeters)
+        val progress = "${active.traveled.roundToInt()} / ${active.path.totalMeters.roundToInt()} 米"
+        val action = when (phase) {
+            PlaybackPhase.PAUSED -> "已暂停"
+            PlaybackPhase.FINISHED -> "已到达"
+            else -> "进行中"
+        }
+        status = status.copy(location = "沿线模拟$action · $progress")
+        queueGps(location)
+    }
+
+    private fun failPlayback(id: String, message: String) {
+        val previous = playbackStatus?.takeIf { it.id == id }
+        playback = null
+        playbackStatus = previous?.copy(phase = PlaybackPhase.FAILED, message = message)
+            ?: PlaybackStatus(id, PlaybackPhase.FAILED, message = message)
+        status = status.copy(location = "沿线模拟停止 · $message")
     }
 
     private fun ResultReceiver.routeStatus(code: Int, message: String) =
@@ -527,6 +687,8 @@ class BridgeService : Service() {
 
     private fun switchMapLocation(testPoint: Location?, mode: MapMode = if (testPoint == null) MapMode.LIVE else MapMode.FIXED) {
         finishRouteSend("定位模式已切换，路线发送中断，可重新发送")
+        playback = null
+        playbackStatus = null
         mapMode = mode
         testMapLocation = testPoint
         lastBearing = 0
@@ -664,6 +826,7 @@ class BridgeService : Service() {
                         loadedCenter = origin
                         val modeLabel = when (requestMode) {
                             MapMode.SIMULATION -> "模拟移动（非当前位置）"
+                            MapMode.ROUTE_PLAYBACK -> "沿线模拟"
                             MapMode.FIXED -> "宁波固定点（非当前位置）"
                             MapMode.COARSE -> "粗略预览（位置可能偏差）"
                             MapMode.LIVE -> "实时地图"
@@ -692,6 +855,8 @@ class BridgeService : Service() {
         testMapLocation = null
         mapMode = MapMode.LIVE
         simulationStep = 0
+        playback = null
+        playbackStatus = null
         lastRoadWaitReason = null
         status = BridgeStatus(bluetooth = "已停止", location = "已停止", roads = "已停止自动地图")
     }
