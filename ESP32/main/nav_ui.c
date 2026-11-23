@@ -44,6 +44,9 @@ static lv_point_precise_t s_marker_points[MARKER_ROWS][2];
 static road_store_t s_road_store;
 static geo_point_t s_route[ROUTE_MAX_POINTS];
 static int s_route_count;
+static geo_point_t s_pending_route[ROUTE_MAX_POINTS];
+static int s_pending_route_expected;
+static int s_pending_route_count;
 /* Double preserves sub-metre movement at absolute longitude ~121 degrees. */
 static double s_center_lat_e6;
 static double s_center_lon_e6;
@@ -482,6 +485,7 @@ void nav_ui_set_ble_state(bool connected)
     if (!ui_lock()) return;
     if (!connected) {
         road_store_abort(&s_road_store);
+        s_pending_route_expected = 0;
         s_camera_animating = false;
         s_gps_valid = false; /* First fix after reconnect snaps to its actual location. */
     }
@@ -505,16 +509,30 @@ void nav_ui_apply_map_event(const roundnav_event_t *event)
 {
     if (event == NULL || !ui_lock()) return;
     if (event->type == ROUNDNAV_EVENT_MAP_BEGIN) {
-        s_route_count = 0;
+        s_pending_route_expected = event->count >= 2 && event->count <= ROUTE_MAX_POINTS ? event->count : 0;
+        s_pending_route_count = 0;
     } else if (event->type == ROUNDNAV_EVENT_MAP_POINT) {
-        if (event->index >= 0 && event->index < ROUTE_MAX_POINTS) {
-            s_route[event->index] = (geo_point_t){ .lat = event->lat_e6, .lon = event->lon_e6 };
-            if (s_route_count <= event->index) s_route_count = event->index + 1;
+        const int index = event->index;
+        if (index >= 0 && index < s_pending_route_expected && index == s_pending_route_count) {
+            s_pending_route[index] = (geo_point_t){ .lat = event->lat_e6, .lon = event->lon_e6 };
+            ++s_pending_route_count;
+        } else if (!(index >= 0 && index < s_pending_route_expected && index < s_pending_route_count &&
+                     s_pending_route[index].lat == event->lat_e6 && s_pending_route[index].lon == event->lon_e6)) {
+            /* A retried ATT packet can repeat points already queued by its first write. */
+            s_pending_route_expected = 0;
         }
     } else if (event->type == ROUNDNAV_EVENT_MAP_END) {
-        render_route();
-        if (s_route_line) lv_obj_move_foreground(s_route_line);
-        draw_position_marker();
+        if (s_pending_route_expected > 0 && s_pending_route_count == s_pending_route_expected) {
+            s_route_count = s_pending_route_count;
+            memcpy(s_route, s_pending_route, s_route_count * sizeof(*s_route));
+            render_route();
+            if (s_route_line) lv_obj_move_foreground(s_route_line);
+            draw_position_marker();
+            ESP_LOGI(TAG, "Route committed: points=%d", s_route_count);
+        } else {
+            ESP_LOGW(TAG, "Incomplete/invalid route; keeping previous route");
+        }
+        s_pending_route_expected = 0;
     }
     ui_unlock();
 }

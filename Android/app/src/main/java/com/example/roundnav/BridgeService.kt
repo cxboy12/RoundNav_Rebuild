@@ -16,6 +16,8 @@ import android.location.LocationManager
 import android.os.*
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.IntentCompat
+import androidx.core.location.LocationCompat
 import java.util.ArrayDeque
 import java.util.UUID
 import kotlin.math.max
@@ -40,6 +42,12 @@ class BridgeService : Service() {
         const val ACTION_TEST_ROADS = "com.example.roundnav.TEST_ROADS"
         const val ACTION_SIMULATE = "com.example.roundnav.SIMULATE"
         const val ACTION_COARSE_MAP = "com.example.roundnav.COARSE_MAP"
+        private const val ACTION_SEND_ROUTE = "com.example.roundnav.SEND_ROUTE"
+        private const val EXTRA_INDOOR = "indoor"
+        private const val EXTRA_ROUTE_STATUS = "routeStatus"
+        internal const val ROUTE_QUEUED = 1
+        internal const val NINGBO_TEST_LAT = 29.8683
+        internal const val NINGBO_TEST_LON = 121.5440
         const val EXTRA_LINE = "line"
         const val EXTRA_LINES = "lines"
         @Volatile var latestLocation: Location? = null
@@ -48,7 +56,21 @@ class BridgeService : Service() {
         private val SERVICE_UUID = UUID.fromString("6e400001-b5a3-f393-e0a9-e50e24dcca9e")
         private val RX_UUID = UUID.fromString("6e400002-b5a3-f393-e0a9-e50e24dcca9e")
 
-        internal fun sendRoute(context: Context, route: RouteResult) = sendBatch(context, RouteApi.toBleCommands(route))
+        internal fun isRouteLocation(location: Location): Boolean {
+            val age = SystemClock.elapsedRealtime() - location.elapsedRealtimeNanos / 1_000_000L
+            return age in 0..RoadMap.MAX_LOCATION_AGE_MS &&
+                location.hasAccuracy() && location.accuracy in 0f..RoadMap.MAX_LOCATION_ACCURACY_M &&
+                !LocationCompat.isMock(location) &&
+                location.latitude in -90.0..90.0 && location.longitude in -180.0..180.0
+        }
+
+        internal fun sendRoute(context: Context, route: RouteResult, indoor: Boolean, receiver: ResultReceiver) {
+            context.startService(Intent(context, BridgeService::class.java)
+                .setAction(ACTION_SEND_ROUTE)
+                .putStringArrayListExtra(EXTRA_LINES, RouteApi.toBleCommands(route))
+                .putExtra(EXTRA_INDOOR, indoor)
+                .putExtra(EXTRA_ROUTE_STATUS, receiver))
+        }
         fun sendCommand(context: Context, line: String) {
             context.startForegroundService(Intent(context, BridgeService::class.java)
                 .setAction(ACTION_SEND_COMMAND).putExtra(EXTRA_LINE, line))
@@ -67,6 +89,7 @@ class BridgeService : Service() {
     private val pendingWrites = ArrayDeque<Write>()
     private var pendingGps: Write? = null
     private var inFlight: Write? = null
+    private var routeReceiver: ResultReceiver? = null
     private var writeAttempts = 0
     private var writeTimeout: Runnable? = null
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -112,8 +135,8 @@ class BridgeService : Service() {
             if (mapMode == MapMode.SIMULATION && txCharacteristic != null) {
                 simulationStep++
                 testMapLocation = Location("ningbo-simulation").apply {
-                    latitude = 29.8683 + RoadMap.simulationOffsetMeters(simulationStep) / 111_319.49
-                    longitude = 121.5440
+                    latitude = NINGBO_TEST_LAT + RoadMap.simulationOffsetMeters(simulationStep) / 111_319.49
+                    longitude = NINGBO_TEST_LON
                 }
                 lastBearing = RoadMap.simulationBearing(simulationStep)
                 queueGps(testMapLocation!!)
@@ -224,6 +247,14 @@ class BridgeService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_SEND_ROUTE) {
+            IntentCompat.getParcelableExtra(intent, EXTRA_ROUTE_STATUS, ResultReceiver::class.java)?.let { receiver ->
+                sendPreview(intent.getStringArrayListExtra(EXTRA_LINES).orEmpty(),
+                    intent.getBooleanExtra(EXTRA_INDOOR, false), receiver)
+            }
+            if (!running) stopSelf(startId)
+            return if (running) START_STICKY else START_NOT_STICKY
+        }
         if (intent?.action == ACTION_STOP) {
             stopSession()
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -262,14 +293,14 @@ class BridgeService : Service() {
             ACTION_SIMULATE -> {
                 simulationStep = 0
                 switchMapLocation(Location("ningbo-simulation").apply {
-                    latitude = 29.8683
-                    longitude = 121.5440
+                    latitude = NINGBO_TEST_LAT
+                    longitude = NINGBO_TEST_LON
                 }, MapMode.SIMULATION)
             }
             ACTION_TEST_ROADS -> {
                 val point = Location("ningbo-test").apply {
-                    latitude = 29.8683
-                    longitude = 121.5440
+                    latitude = NINGBO_TEST_LAT
+                    longitude = NINGBO_TEST_LON
                 }
                 switchMapLocation(point)
             }
@@ -331,6 +362,7 @@ class BridgeService : Service() {
     }
 
     private fun resetConnection(message: String) {
+        finishRouteSend("路线发送中断：$message。连接就绪后可重发")
         handler.removeCallbacks(connectionTimeout)
         handler.removeCallbacks(reconnect)
         cancelWriteTimeout()
@@ -357,6 +389,51 @@ class BridgeService : Service() {
         if (raw.isBlank()) return
         if (raw.startsWith("G,")) { pendingGps = Write(raw); drainQueue() }
         else enqueueBatch(listOf(raw))
+    }
+
+    private fun sendPreview(lines: List<String>, indoor: Boolean, receiver: ResultReceiver) {
+        if (!running || txCharacteristic == null) {
+            receiver.routeStatus(0, "请在首页启动蓝牙并等待 RoundNav 就绪，再发送路线")
+            return
+        }
+        if (routeReceiver != null) {
+            receiver.routeStatus(0, "已有路线正在发送，请稍后重试")
+            return
+        }
+        if (indoor) {
+            if (mapMode != MapMode.FIXED) {
+                switchMapLocation(Location("ningbo-test").apply {
+                    latitude = NINGBO_TEST_LAT
+                    longitude = NINGBO_TEST_LON
+                })
+            } else {
+                testMapLocation?.let(::queueGps)
+            }
+        } else {
+            if (latestLocation?.let(::isRouteLocation) != true) {
+                receiver.routeStatus(0, "圆屏服务正在等待精确定位，请在首页启用实时模式后重试")
+                return
+            }
+            if (mapMode != MapMode.LIVE) switchMapLocation(null, MapMode.LIVE)
+        }
+        routeReceiver = receiver
+        receiver.routeStatus(ROUTE_QUEUED, "路线已排队，等待蓝牙写入")
+        val queued = enqueueBatch(lines) {
+            if (routeReceiver === receiver) {
+                Log.i(TAG, "Route ATT writes complete: points=${lines.size - 2}")
+                finishRouteSend("蓝牙写入完成，请查看圆屏")
+            }
+        }
+        if (!queued) finishRouteSend("蓝牙队列繁忙或数据长度不足，请重试")
+    }
+
+    private fun ResultReceiver.routeStatus(code: Int, message: String) =
+        send(code, Bundle().apply { putString("message", message) })
+
+    private fun finishRouteSend(message: String) {
+        val receiver = routeReceiver ?: return
+        routeReceiver = null
+        receiver.routeStatus(0, message)
     }
 
     private fun enqueueBatch(lines: List<String>, onSent: (() -> Unit)? = null): Boolean {
@@ -449,6 +526,7 @@ class BridgeService : Service() {
     private fun currentMapLocation(): Location? = testMapLocation ?: latestLocation?.takeIf(::isFresh)
 
     private fun switchMapLocation(testPoint: Location?, mode: MapMode = if (testPoint == null) MapMode.LIVE else MapMode.FIXED) {
+        finishRouteSend("定位模式已切换，路线发送中断，可重新发送")
         mapMode = mode
         testMapLocation = testPoint
         lastBearing = 0

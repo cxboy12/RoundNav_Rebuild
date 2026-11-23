@@ -126,26 +126,16 @@ class MainActivity : ComponentActivity() {
         }
         content.addView(destLat, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
         content.addView(destLon, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
-        addButton(content, "按当前位置规划摩托车路线并发送到圆屏") {
-            val origin = BridgeService.latestLocation
+        addButton(content, "规划并预览摩托车路线") {
             val targetLat = destLat.text.toString().toDoubleOrNull()
             val targetLon = destLon.text.toString().toDoubleOrNull()
-            if (origin == null) {
-                status.text = "尚未取得 GPS 定位，请先启动 BLE + 实时 GPS"
-            } else if (targetLat == null || targetLon == null || targetLat !in -90.0..90.0 || targetLon !in -180.0..180.0) {
+            if (targetLat == null || targetLon == null || targetLat !in -90.0..90.0 || targetLon !in -180.0..180.0) {
                 status.text = "目的地经纬度格式不正确"
             } else {
-                status.text = "正在请求 Valhalla 摩托车路线……"
-                RouteApi.fetchMotorcycleRoute(origin.latitude, origin.longitude, targetLat, targetLon) { route, error ->
-                    runOnUiThread {
-                        if (error != null || route == null) {
-                            status.text = "路线请求失败：${error?.message ?: "没有路线"}"
-                        } else {
-                            BridgeService.sendRoute(this, route)
-                            status.text = "路线已加入 BLE 队列：${route.coordinates.size} 个坐标点"
-                        }
-                    }
-                }
+                startActivity(Intent(this, MapActivity::class.java)
+                    .putExtra(MapActivity.EXTRA_ROUTE_PREVIEW, true)
+                    .putExtra("latitude", targetLat)
+                    .putExtra("longitude", targetLon))
             }
         }
         val hint = TextView(this).apply {

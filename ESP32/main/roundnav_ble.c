@@ -100,7 +100,7 @@ static int parse_line(char *line)
         ev.type = ROUNDNAV_EVENT_MAP_POINT; ev.index = a; ev.lat_e6 = b; ev.lon_e6 = c;
         return post_event(&ev) ? 0 : -1;
     }
-    if (line[0] == 'E' || line[0] == 'e') {
+    if (strcmp(line, "E") == 0 || strcmp(line, "e") == 0) {
         ev.type = ROUNDNAV_EVENT_MAP_END;
         return post_event(&ev) ? 0 : -1;
     }

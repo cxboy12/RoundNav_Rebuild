@@ -6,7 +6,11 @@ import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.math.roundToInt
 
-internal data class RouteResult(val coordinates: List<Pair<Double, Double>>)
+internal data class RouteResult(
+    val coordinates: List<Pair<Double, Double>>, // longitude, latitude
+    val distanceKm: Double?,
+    val durationSeconds: Double?
+)
 
 /** Basic Valhalla motorcycle route request. The server's /ningbo/route endpoint must proxy Valhalla's native JSON API. */
 internal object RouteApi {
@@ -39,20 +43,13 @@ internal object RouteApi {
                 connection.outputStream.use { it.write(request.toString().toByteArray(Charsets.UTF_8)) }
                 val code = connection.responseCode
                 val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-                val body = stream.bufferedReader().use { it.readText() }
-                if (code !in 200..299) error("Route HTTP $code: $body")
-                val json = JSONObject(body)
-                val direct = json.optJSONArray("coordinates")
-                val coords = if (direct != null) parseCoordinateArray(direct) else {
-                    val shape = json.optJSONObject("trip")?.optJSONArray("legs")
-                        ?.optJSONObject(0)?.optString("shape", "")
-                        ?: json.optJSONArray("trip")?.optJSONObject(0)?.optString("shape", "")
-                        ?: ""
-                    decodePolyline6(shape)
+                if (code !in 200..299) {
+                    stream?.close()
+                    error("路线接口 HTTP $code")
                 }
-                if (coords.size < 2) error("Route response contains no usable route coordinates")
-                callback(RouteResult(coords), null)
-            } catch (t: Throwable) {
+                val body = stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                callback(parseResponse(body), null)
+            } catch (t: Exception) {
                 callback(null, t)
             } finally {
                 connection?.disconnect()
@@ -60,55 +57,76 @@ internal object RouteApi {
         }.start()
     }
 
-    private fun parseCoordinateArray(array: JSONArray): List<Pair<Double, Double>> {
-        val out = mutableListOf<Pair<Double, Double>>()
-        for (i in 0 until array.length()) {
-            val p = array.optJSONArray(i) ?: continue
-            if (p.length() >= 2) out.add(p.optDouble(0) to p.optDouble(1)) // lon,lat
+    fun parseResponse(body: String): RouteResult {
+        val json = JSONObject(body)
+        val trip = json.optJSONObject("trip")
+        val legs = trip?.optJSONArray("legs") ?: json.optJSONArray("trip")
+        val direct = json.optJSONArray("coordinates")
+        val coordinates = when {
+            direct != null -> List(direct.length()) { index ->
+                val point = direct.getJSONArray(index)
+                point.optDouble(0) to point.optDouble(1)
+            }
+            legs != null -> buildList {
+                for (index in 0 until legs.length()) {
+                    val points = decodePolyline6(legs.getJSONObject(index).getString("shape"))
+                    addAll(if (lastOrNull() == points.first()) points.drop(1) else points)
+                }
+            }
+            else -> emptyList()
         }
-        return out
+        require(coordinates.size >= 2 && coordinates.all { (lon, lat) ->
+            lat in -90.0..90.0 && lon in -180.0..180.0
+        }) { "路线接口未返回有效坐标" }
+        val summary = trip?.optJSONObject("summary") ?: json.optJSONObject("summary")
+        val length = summary?.nonNegative("length")
+        val distanceKm = when (trip?.optString("units", "kilometers") ?: json.optString("units", "kilometers")) {
+            "kilometers" -> length
+            "miles" -> length?.times(1.609344)
+            else -> null
+        }
+        return RouteResult(coordinates, distanceKm, summary?.nonNegative("time"))
     }
 
+    private fun JSONObject.nonNegative(key: String) = optDouble(key).takeIf { it.isFinite() && it >= 0 }
+
     private fun decodePolyline6(encoded: String): List<Pair<Double, Double>> {
-        if (encoded.isBlank()) return emptyList()
+        require(encoded.isNotEmpty()) { "路线形状为空" }
         val points = mutableListOf<Pair<Double, Double>>()
         var index = 0
-        var lat = 0
-        var lon = 0
-        while (index < encoded.length) {
+        var lat = 0L
+        var lon = 0L
+        fun readDelta(): Int {
             var result = 0
             var shift = 0
-            var b: Int
-            do {
-                if (index >= encoded.length) return points
-                b = encoded[index++].code - 63
-                result = result or ((b and 0x1f) shl shift)
+            while (index < encoded.length && shift <= 25) {
+                val value = encoded[index++].code - 63
+                if (value !in 0..63) break
+                result = result or ((value and 0x1f) shl shift)
+                if (value < 32) return if (result and 1 == 0) result shr 1 else (result shr 1).inv()
                 shift += 5
-            } while (b >= 0x20)
-            val dLat = if ((result and 1) != 0) (result shr 1).inv() else result shr 1
-            lat += dLat
-            result = 0
-            shift = 0
-            do {
-                if (index >= encoded.length) return points
-                b = encoded[index++].code - 63
-                result = result or ((b and 0x1f) shl shift)
-                shift += 5
-            } while (b >= 0x20)
-            val dLon = if ((result and 1) != 0) (result shr 1).inv() else result shr 1
-            lon += dLon
+            }
+            error("路线 polyline6 数据不完整或格式无效")
+        }
+        while (index < encoded.length) {
+            lat += readDelta()
+            lon += readDelta()
             points.add((lon / 1_000_000.0) to (lat / 1_000_000.0))
         }
         return points
     }
 
-    fun toBleCommands(route: RouteResult): ArrayList<String> {
+    fun displayCoordinates(route: RouteResult): List<Pair<Double, Double>> {
         val points = route.coordinates
         val limit = 500
-        val selected = if (points.size <= limit) points else {
+        return if (points.size <= limit) points else {
             val step = (points.size - 1).toDouble() / (limit - 1).toDouble()
             (0 until limit).map { points[(it * step).roundToInt()] }
         }
+    }
+
+    fun toBleCommands(route: RouteResult): ArrayList<String> {
+        val selected = displayCoordinates(route)
         val commands = arrayListOf("B,${selected.size}")
         selected.forEachIndexed { index, p ->
             val lon = p.first
