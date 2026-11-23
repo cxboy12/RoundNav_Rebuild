@@ -34,7 +34,7 @@ def write_fixture(path, prohibited):
     ET.ElementTree(graph).write(path, encoding="utf-8", xml_declaration=True)
 
 
-def prepare_graph(root, results, dataset):
+def prepare_graph(root, results, dataset, source=None):
     tile_dir = root / f"tiles-{dataset}"
     tile_dir.mkdir()
     config = json.loads(subprocess.check_output(
@@ -47,9 +47,10 @@ def prepare_graph(root, results, dataset):
         config["mjolnir"].pop(key, None)
     config_path = root / f"config-{dataset}.json"
     config_path.write_text(json.dumps(config))
-    source = results / f"{dataset}.osm"
-    if dataset != "ningbo":
-        write_fixture(source, prohibited=dataset == "no-uturn")
+    if source is None:
+        source = results / f"{dataset}.osm"
+        if dataset != "ningbo":
+            write_fixture(source, prohibited=dataset == "no-uturn")
     pbf = root / f"{dataset}.osm.pbf"
     subprocess.run(["osmium", "cat", source, "-o", pbf], check=True)
     subprocess.run([root / "build/valhalla_build_tiles", "-c", config_path, pbf], check=True)
@@ -77,16 +78,18 @@ def decode_polyline(encoded):
     return points
 
 
-def route(root, results, dataset, mode, build):
-    points = NINGBO if dataset == "ningbo" else FIXTURE
+def route(root, results, dataset, mode, build, locations=None):
+    if locations is None:
+        points = NINGBO if dataset == "ningbo" else FIXTURE
+        locations = [{"lat": lat, "lon": lon, "type": "break"} for lat, lon in points]
+        if dataset != "ningbo":
+            for point, heading in zip(locations, (180, 0)):
+                point.update(heading=heading, heading_tolerance=30, minimum_reachability=0,
+                             search_cutoff=25, node_snap_tolerance=0)
     request = {
-        "locations": [{"lat": lat, "lon": lon, "type": "break"} for lat, lon in points],
+        "locations": locations,
         "costing": mode, "units": "kilometers", "shape_format": "polyline6",
     }
-    if dataset != "ningbo":
-        for point, heading in zip(request["locations"], (180, 0)):
-            point.update(heading=heading, heading_tolerance=30, minimum_reachability=0,
-                         search_cutoff=25, node_snap_tolerance=0)
     args = [root / "build/valhalla_service", root / f"config-{dataset}.json", "route",
             json.dumps(request)]
     response = subprocess.check_output(args, text=True, encoding="utf-8")
