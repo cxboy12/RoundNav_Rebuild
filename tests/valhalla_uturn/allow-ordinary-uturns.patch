@@ -33,7 +33,7 @@
    uint32_t idx = pred.opp_local_idx();
    Cost c = base_transition_cost(node, edge, &pred, idx, edge_destonly);
 +  // RoundNav experiment: apply 15 seconds of generalized cost to direct reversals.
-+  if (!shortest_ && edge->localedgeidx() == idx) {
++  if (!shortest_ && !pred.deadend() && edge->localedgeidx() == idx) {
 +    c.cost += 15.0f;
 +  }
  
@@ -44,7 +44,7 @@
    // destination only, alley, maneuver penalty
    Cost c = base_transition_cost(node, edge, pred, idx, pred_label.destonly(), opp_edge_destonly);
 +  // RoundNav experiment: apply 15 seconds of generalized cost to direct reversals.
-+  if (!shortest_ && idx == pred_label.opp_local_idx()) {
++  if (!shortest_ && !pred_label.deadend() && idx == pred_label.opp_local_idx()) {
 +    c.cost += 15.0f;
 +  }
  
@@ -80,24 +80,54 @@
    // destination only, alley, maneuver penalty
    uint32_t idx = pred.opp_local_idx();
    Cost c = base_transition_cost(node, edge, &pred, idx, edge_destonly);
-+  // RoundNav experiment: apply 15 seconds of generalized cost to direct reversals.
-+  if (!shortest_ && edge->localedgeidx() == idx) {
++  const bool ordinary_uturn = !pred.deadend() && edge->localedgeidx() == idx;
++  if (!shortest_ && ordinary_uturn) {
 +    c.cost += 15.0f;
 +  }
    c.secs += OSRMCarTurnDuration(edge, node, idx);
  
    const auto stopimpact = edge->stopimpact(idx);
-@@ -587,6 +589,10 @@
+@@ -545,8 +547,12 @@
+       seconds *= stopimpact;
+     }
+ 
+-    AddUturnPenalty(idx, node, edge, has_reverse, has_left, has_right, false, InternalTurn::kNoTurn,
+-                    seconds);
++    // The experiment uses its own cost for this maneuver. Keep the existing
++    // penalties on dead ends and all other turns.
++    if (!ordinary_uturn) {
++      AddUturnPenalty(idx, node, edge, has_reverse, has_left, has_right, false,
++                      InternalTurn::kNoTurn, seconds);
++    }
+ 
+     // Apply density factor and stop impact penalty if there isn't traffic on this edge or you're not
+     // using traffic
+@@ -587,6 +593,10 @@
    // Get the transition cost for country crossing, ferry, gate, toll booth,
    // destination only, alley, maneuver penalty
    Cost c = base_transition_cost(node, edge, pred, idx, pred_label.destonly(), opp_edge_destonly);
-+  // RoundNav experiment: apply 15 seconds of generalized cost to direct reversals.
-+  if (!shortest_ && idx == pred_label.opp_local_idx()) {
++  const bool ordinary_uturn = !pred_label.deadend() && idx == pred_label.opp_local_idx();
++  if (!shortest_ && ordinary_uturn) {
 +    c.cost += 15.0f;
 +  }
    c.secs += OSRMCarTurnDuration(edge, node, pred->opp_local_idx());
  
    const auto stopimpact = edge->stopimpact(idx);
+@@ -622,8 +632,12 @@
+       seconds *= stopimpact;
+     }
+ 
+-    AddUturnPenalty(idx, node, edge, has_reverse, has_left, has_right, false, InternalTurn::kNoTurn,
+-                    seconds);
++    // The experiment uses its own cost for this maneuver. Keep the existing
++    // penalties on dead ends and all other turns.
++    if (!ordinary_uturn) {
++      AddUturnPenalty(idx, node, edge, has_reverse, has_left, has_right, false,
++                      InternalTurn::kNoTurn, seconds);
++    }
+ 
+     // Apply density factor and stop impact penalty if there isn't traffic on this edge or you're not
+     // using traffic
 --- a/src/thor/bidirectional_astar.cc
 +++ b/src/thor/bidirectional_astar.cc
 @@ -436,8 +436,7 @@

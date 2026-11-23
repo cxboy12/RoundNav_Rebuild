@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   compare:
     runs-on: ubuntu-24.04
@@ -30,10 +34,10 @@ jobs:
             https://github.com/valhalla/valhalla.git "$RUNNER_TEMP/valhalla"
           test "$(git -C "$RUNNER_TEMP/valhalla" rev-parse HEAD)" = "$UPSTREAM_COMMIT"
           cmake -S "$RUNNER_TEMP/valhalla" -B "$RUNNER_TEMP/build" -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS_RELEASE="-O1 -DNDEBUG" \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS_RELEASE="-O0 -DNDEBUG" \
             -DBUILD_SHARED_LIBS=OFF -DENABLE_TESTS=OFF -DENABLE_SERVICES=OFF \
             -DENABLE_HTTP=OFF -DENABLE_GEOTIFF=OFF -DENABLE_PYTHON_BINDINGS=OFF
-          cmake --build "$RUNNER_TEMP/build" --parallel 3 --target valhalla_service valhalla_build_tiles
+          cmake --build "$RUNNER_TEMP/build" --parallel 4 --target valhalla_service valhalla_build_tiles
       - name: Acquire the shared, read-only map input and run baseline
         run: |
           mkdir "$RUNNER_TEMP/results"
@@ -47,7 +51,7 @@ jobs:
         run: |
           git -C "$RUNNER_TEMP/valhalla" apply --check "$GITHUB_WORKSPACE/tests/valhalla_uturn/allow-ordinary-uturns.patch"
           git -C "$RUNNER_TEMP/valhalla" apply "$GITHUB_WORKSPACE/tests/valhalla_uturn/allow-ordinary-uturns.patch"
-          cmake --build "$RUNNER_TEMP/build" --parallel 3 --target valhalla_service
+          cmake --build "$RUNNER_TEMP/build" --parallel 4 --target valhalla_service
           python3 tests/valhalla_uturn/compare.py "$RUNNER_TEMP" patched | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()

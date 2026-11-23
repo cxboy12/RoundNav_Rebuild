@@ -115,12 +115,13 @@ def route(root, results, dataset, mode, build):
     return summary
 
 
-def reverses_at_fixture_junction(summary):
+def reverses_at_fixture_junction(results, dataset, mode, build):
+    feature = json.loads((results / f"{dataset}-{mode}-{build}.geojson").read_text(encoding="utf-8"))
+    points = feature["geometry"]["coordinates"]
     return any(
-        step["type"] in (12, 13)
-        and abs(step["position_lon_lat"][0] - 121.5) < 0.00001
-        and abs(step["position_lon_lat"][1] - 29.908) < 0.00001
-        for step in summary["instructions"]
+        abs(at[0] - 121.5) < 0.00001 and abs(at[1] - 29.908) < 0.00001
+        and before[1] > at[1] and after[1] > at[1]
+        for before, at, after in zip(points, points[1:], points[2:])
     )
 
 
@@ -140,13 +141,15 @@ def main():
             print(dataset, mode, args.build, json.dumps(summary, ensure_ascii=False))
             if args.build == "patched" and dataset != "ningbo":
                 baseline = json.loads((results / f"{dataset}-{mode}-baseline.json").read_text(encoding="utf-8"))
-                if reverses_at_fixture_junction(baseline):
+                if reverses_at_fixture_junction(results, dataset, mode, "baseline"):
                     failures.append(f"{dataset}/{mode}: baseline selected the ordinary-node reversal")
-                if dataset == "no-uturn" and reverses_at_fixture_junction(summary):
+                reverses_here = reverses_at_fixture_junction(results, dataset, mode, args.build)
+                if dataset == "no-uturn" and reverses_here:
                     failures.append(f"{mode}: selected an explicitly prohibited reversal")
                 if dataset == "ordinary" and (
-                    not reverses_at_fixture_junction(summary)
+                    not reverses_here
                     or summary["distance_m"] >= baseline["distance_m"]
+                    or not any(step["type"] in (12, 13) for step in summary["instructions"])
                 ):
                     failures.append(f"{mode}: patched route did not take the shorter reversal")
     if failures:
