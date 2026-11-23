@@ -22,7 +22,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build libboost-dev libprotobuf-dev protobuf-compiler \
-            zlib1g-dev libsqlite3-dev libspatialite-dev libluajit-5.1-dev libgeos-dev \
+            zlib1g-dev libsqlite3-dev libspatialite-dev spatialite-bin libluajit-5.1-dev libgeos-dev \
             libssl-dev libexpat1-dev liblz4-dev osmium-tool
       - name: Build pinned upstream baseline
         run: |
@@ -37,7 +37,7 @@ jobs:
       - name: Acquire the shared, read-only map input and run baseline
         run: |
           mkdir "$RUNNER_TEMP/results"
-          curl --fail --silent --show-error --retry 2 --max-time 60 \
+          curl --fail --silent --show-error --compressed --retry 2 --max-time 150 \
             --user-agent RoundNav-route-experiment \
             'https://api.openstreetmap.org/api/0.6/map?bbox=121.537,29.861,121.553,29.879' \
             -o "$RUNNER_TEMP/results/ningbo.osm"
