@@ -8,20 +8,108 @@ echo "实验目录: $work"
 trap 'echo "实验未完成。生成的文件和构建日志在 $work" >&2' ERR
 
 image=$(sudo docker inspect --format '{{.Image}}' "$container")
-git clone --quiet --depth 1 --branch codex/ningbo-junction-connector-test \
-  https://github.com/cxboy12/RoundNav_Rebuild.git "$work/source"
-export PYTHONPATH="$work/source/tests/valhalla_uturn"
+cat > "$work/roundnav_fixture.py" <<'HELPER'
+import xml.etree.ElementTree as ET
 
-echo '下载公开测试路网'
-curl -fsS --compressed --retry 2 --max-time 150 \
-  'https://api.openstreetmap.org/api/0.6/map?bbox=121.537,29.861,121.553,29.879' \
-  -o "$work/original.osm"
+
+SOUTHBOUND = "8117742122"
+NORTHBOUND = "8117742123"
+
+
+def tags(element):
+    return {tag.get("k"): tag.get("v") for tag in element.findall("tag")}
+
+
+def write_derived_graph(original, destination):
+    tree = ET.parse(original)
+    graph = tree.getroot()
+    nodes = {node.get("id"): node for node in graph.findall("node")}
+    ways = {way.get("id"): way for way in graph.findall("way")}
+    endpoints = {SOUTHBOUND, NORTHBOUND}
+    footway = ways["871536802"]
+    if tags(footway).get("highway") != "footway" or not endpoints.issubset(
+        {node.get("ref") for node in footway.findall("nd")}
+    ):
+        raise RuntimeError("The public junction topology has changed; inspect it before testing")
+    for way_id, node_id in (("62125946", SOUTHBOUND), ("909234228", NORTHBOUND)):
+        way = ways[way_id]
+        if tags(way).get("oneway") != "yes" or not any(
+            node.get("ref") == node_id for node in way.findall("nd")
+        ):
+            raise RuntimeError(f"One-way carriageway {way_id} no longer matches the fixture")
+    for relation in graph.findall("relation"):
+        if tags(relation).get("type", "").startswith("restriction") and any(
+            (member.get("type") == "node" and member.get("ref") in endpoints)
+            or (member.get("type") == "way" and member.get("ref") == "871536802")
+            for member in relation.findall("member")
+        ):
+            raise RuntimeError(f"Review turn restriction {relation.get('id')} before testing")
+
+    # The existing sidewalk and all restrictions remain intact in the derived file.
+    way_id = max(map(int, ways)) + 1
+    link = ET.Element("way", id=str(way_id), version="1")
+    for node_id in (SOUTHBOUND, NORTHBOUND):
+        ET.SubElement(link, "nd", ref=node_id)
+    for key, value in (
+        ("highway", "primary_link"), ("oneway", "yes"), ("access", "no"),
+        ("motorcar", "yes"), ("motorcycle", "yes"),
+    ):
+        ET.SubElement(link, "tag", k=key, v=value)
+    insertion = list(graph).index(next(reversed(ways.values()))) + 1
+    graph.insert(insertion, link)
+    tree.write(destination, encoding="utf-8", xml_declaration=True)
+
+    return [
+        (float(nodes[node_id].get("lon")), float(nodes[node_id].get("lat")))
+        for node_id in (SOUTHBOUND, NORTHBOUND)
+    ]
+
+
+def passes_link(points, link):
+    def near(point, endpoint):
+        return max(abs(value - expected) for value, expected in zip(point, endpoint)) < 0.000002
+
+    return any(near(start, link[0]) and near(end, link[1])
+               for start, end in zip(points, points[1:]))
+
+
+def decode_polyline(encoded):
+    values = iter(encoded)
+
+    def delta():
+        result = shift = 0
+        for char in values:
+            value = ord(char) - 63
+            result |= (value & 31) << shift
+            if value < 32:
+                return ~(result >> 1) if result & 1 else result >> 1
+            shift += 5
+        return None
+
+    lat = lon = 0
+    points = []
+    while (latitude := delta()) is not None:
+        lat += latitude
+        lon += delta()
+        points.append((lon / 1e6, lat / 1e6))
+    return points
+HELPER
+export PYTHONPATH="$work"
+
+if [[ $# -gt 0 ]]; then
+  cp -- "$1" "$work/original.osm"
+else
+  echo '下载公开测试路网'
+  curl -fsS --compressed --retry 2 --max-time 150 \
+    'https://api.openstreetmap.org/api/0.6/map?bbox=121.537,29.861,121.553,29.879' \
+    -o "$work/original.osm"
+fi
 
 python3 -B - "$work" <<'PY'
 import json
 import sys
 from pathlib import Path
-from compare_connector import write_derived_graph
+from roundnav_fixture import write_derived_graph
 
 work = Path(sys.argv[1])
 link = write_derived_graph(work / "original.osm", work / "experimental.osm")
@@ -66,8 +154,7 @@ python3 -B - "$work" <<'PY'
 import json
 import sys
 from pathlib import Path
-from compare import decode_polyline
-from compare_connector import passes_link
+from roundnav_fixture import decode_polyline, passes_link
 
 work = Path(sys.argv[1])
 trip = json.loads((work / "route.txt").read_text().strip().splitlines()[-1])["trip"]
