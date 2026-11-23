@@ -1,0 +1,59 @@
+name: Valhalla U-turn experiment
+
+on:
+  push:
+    branches: [codex/valhalla-uturn-experiment]
+    paths:
+      - .github/workflows/valhalla-uturn-experiment.yml
+      - tests/valhalla_uturn/**
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      UPSTREAM_COMMIT: 5c7f918e61306521d79cc4496d40c19c5305fa4b
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install Valhalla build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libboost-dev libprotobuf-dev protobuf-compiler \
+            zlib1g-dev libsqlite3-dev libspatialite-dev libluajit-5.1-dev libgeos-dev \
+            libssl-dev libexpat1-dev liblz4-dev osmium-tool
+      - name: Build pinned upstream baseline
+        run: |
+          git clone --depth 1 --branch 3.9.3 --recurse-submodules --shallow-submodules \
+            https://github.com/valhalla/valhalla.git "$RUNNER_TEMP/valhalla"
+          test "$(git -C "$RUNNER_TEMP/valhalla" rev-parse HEAD)" = "$UPSTREAM_COMMIT"
+          cmake -S "$RUNNER_TEMP/valhalla" -B "$RUNNER_TEMP/build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS_RELEASE="-O1 -DNDEBUG" \
+            -DBUILD_SHARED_LIBS=OFF -DENABLE_TESTS=OFF -DENABLE_SERVICES=OFF \
+            -DENABLE_HTTP=OFF -DENABLE_GEOTIFF=OFF -DENABLE_PYTHON_BINDINGS=OFF
+          cmake --build "$RUNNER_TEMP/build" --parallel 3 --target valhalla_service valhalla_build_tiles
+      - name: Acquire the shared, read-only map input and run baseline
+        run: |
+          mkdir "$RUNNER_TEMP/results"
+          curl --fail --silent --show-error --retry 2 --max-time 60 \
+            --user-agent RoundNav-route-experiment \
+            'https://api.openstreetmap.org/api/0.6/map?bbox=121.537,29.861,121.553,29.879' \
+            -o "$RUNNER_TEMP/results/ningbo.osm"
+          sha256sum "$RUNNER_TEMP/results/ningbo.osm" | tee "$RUNNER_TEMP/results/input-sha256.txt"
+          python3 tests/valhalla_uturn/compare.py "$RUNNER_TEMP" baseline
+      - name: Apply the temporary change and run on the same tiles
+        run: |
+          git -C "$RUNNER_TEMP/valhalla" apply --check "$GITHUB_WORKSPACE/tests/valhalla_uturn/allow-ordinary-uturns.patch"
+          git -C "$RUNNER_TEMP/valhalla" apply "$GITHUB_WORKSPACE/tests/valhalla_uturn/allow-ordinary-uturns.patch"
+          cmake --build "$RUNNER_TEMP/build" --parallel 3 --target valhalla_service
+          python3 tests/valhalla_uturn/compare.py "$RUNNER_TEMP" patched | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: valhalla-uturn-comparison
+          path: |
+            ${{ runner.temp }}/results/*.json
+            ${{ runner.temp }}/results/*.geojson
+            ${{ runner.temp }}/results/*.txt

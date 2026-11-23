@@ -1,0 +1,160 @@
+--- a/src/sif/bicyclecost.cc
++++ b/src/sif/bicyclecost.cc
+@@ -576,11 +576,9 @@
+   }
+ 
+   // Check bicycle access and turn restrictions. Bicycles should obey
+-  // vehicular turn restrictions. Allow Uturns at dead ends only.
++  // vehicular turn restrictions.
+   // Skip impassable edges and shortcut edges.
+   if (!IsAccessible(edge) || edge->is_shortcut() ||
+-      (!pred.deadend() && pred.opp_local_idx() == edge->localedgeidx() &&
+-       pred.mode() == TravelMode::kBicycle) ||
+       (!ignore_turn_restrictions_ && (pred.restrictions() & (1 << edge->localedgeidx()))) ||
+       IsUserAvoidEdge(edgeid) || CheckExclusions<true>(edge, pred)) {
+     return false;
+@@ -621,13 +619,11 @@
+     return true;
+   }
+ 
+-  // Check access, U-turn (allow at dead-ends), and simple turn restriction.
++  // Check access and simple turn restrictions.
+   // Do not allow transit connection edges.
+   if (!IsAccessible(opp_edge) || opp_edge->is_shortcut() ||
+       opp_edge->use() == Use::kTransitConnection || opp_edge->use() == Use::kEgressConnection ||
+       opp_edge->use() == Use::kPlatformConnection ||
+-      (!pred.deadend() && pred.opp_local_idx() == edge->localedgeidx() &&
+-       pred.mode() == TravelMode::kBicycle) ||
+       (!ignore_turn_restrictions_ && (opp_edge->restrictions() & (1 << pred.opp_local_idx()))) ||
+       IsUserAvoidEdge(opp_edgeid) || CheckExclusions<false>(opp_edge, pred)) {
+     return false;
+@@ -761,6 +757,10 @@
+   // destination only, alley, maneuver penalty
+   uint32_t idx = pred.opp_local_idx();
+   Cost c = base_transition_cost(node, edge, &pred, idx, edge_destonly);
++  // RoundNav experiment: apply 15 seconds of generalized cost to direct reversals.
++  if (!shortest_ && edge->localedgeidx() == idx) {
++    c.cost += 15.0f;
++  }
+ 
+   // Reduce penalty to make this turn if the road we are turning on has some kind of bicycle
+   // accommodation
+@@ -842,6 +842,10 @@
+   // Get the transition cost for country crossing, ferry, gate, toll booth,
+   // destination only, alley, maneuver penalty
+   Cost c = base_transition_cost(node, edge, pred, idx, pred_label.destonly(), opp_edge_destonly);
++  // RoundNav experiment: apply 15 seconds of generalized cost to direct reversals.
++  if (!shortest_ && idx == pred_label.opp_local_idx()) {
++    c.cost += 15.0f;
++  }
+ 
+   // Reduce penalty to make this turn if the road we are turning on has some kind of bicycle
+   // accommodation
+--- a/src/sif/motorscootercost.cc
++++ b/src/sif/motorscootercost.cc
+@@ -390,9 +390,8 @@
+     return true;
+   }
+ 
+-  // Check access, U-turn, and simple turn restriction.
+-  // Allow U-turns at dead-end nodes.
+-  if (!IsAccessible(edge) || (!pred.deadend() && pred.opp_local_idx() == edge->localedgeidx()) ||
++  // Check access and simple turn restrictions.
++  if (!IsAccessible(edge) ||
+       ((pred.restrictions() & (1 << edge->localedgeidx())) && !ignore_turn_restrictions_) ||
+       (edge->surface() > kMinimumScooterSurface) || IsUserAvoidEdge(edgeid) ||
+       (!allow_destination_only_ && !pred.destonly() && edge->destonly()) ||
+@@ -424,9 +423,8 @@
+     return true;
+   }
+ 
+-  // Check access, U-turn, and simple turn restriction.
+-  // Allow U-turns at dead-end nodes.
+-  if (!IsAccessible(opp_edge) || (!pred.deadend() && pred.opp_local_idx() == edge->localedgeidx()) ||
++  // Check access and simple turn restrictions.
++  if (!IsAccessible(opp_edge) ||
+       ((opp_edge->restrictions() & (1 << pred.opp_local_idx())) && !ignore_turn_restrictions_) ||
+       (opp_edge->surface() > kMinimumScooterSurface) || IsUserAvoidEdge(opp_edgeid) ||
+       (!allow_destination_only_ && !pred.destonly() && opp_edge->destonly()) ||
+@@ -508,6 +506,10 @@
+   // destination only, alley, maneuver penalty
+   uint32_t idx = pred.opp_local_idx();
+   Cost c = base_transition_cost(node, edge, &pred, idx, edge_destonly);
++  // RoundNav experiment: apply 15 seconds of generalized cost to direct reversals.
++  if (!shortest_ && edge->localedgeidx() == idx) {
++    c.cost += 15.0f;
++  }
+   c.secs += OSRMCarTurnDuration(edge, node, idx);
+ 
+   const auto stopimpact = edge->stopimpact(idx);
+@@ -587,6 +589,10 @@
+   // Get the transition cost for country crossing, ferry, gate, toll booth,
+   // destination only, alley, maneuver penalty
+   Cost c = base_transition_cost(node, edge, pred, idx, pred_label.destonly(), opp_edge_destonly);
++  // RoundNav experiment: apply 15 seconds of generalized cost to direct reversals.
++  if (!shortest_ && idx == pred_label.opp_local_idx()) {
++    c.cost += 15.0f;
++  }
+   c.secs += OSRMCarTurnDuration(edge, node, pred->opp_local_idx());
+ 
+   const auto stopimpact = edge->stopimpact(idx);
+--- a/src/thor/bidirectional_astar.cc
++++ b/src/thor/bidirectional_astar.cc
+@@ -436,8 +436,7 @@
+ 
+     // Begin by checking if this is the opposing edge to pred.
+     // If so, it means we are attempting a u-turn. In that case, lets wait with evaluating
+-    // this edge until last. If any other edges were emplaced, it means we should not
+-    // even try to evaluate a u-turn since u-turns should only happen for deadends
++    // this edge until last so we know whether the expansion reached a dead end.
+     bool is_uturn = pred.opp_local_idx() == meta.edge->localedgeidx();
+     uturn_meta = is_uturn ? meta : uturn_meta;
+ 
+@@ -481,10 +480,13 @@
+ 
+   // Now, after having looked at all the edges, including edges on other levels,
+   // we can say if this is a deadend or not, and if so, evaluate the uturn-edge (if it exists)
+-  if (!disable_uturn && uturn_meta) {
+-    // If we found no suitable edge to add, it means we're at a deadend
+-    // so lets go back and re-evaluate a potential u-turn
+-    pred.set_deadend(true);
++  // RoundNav experiment: evaluate a legal opposing edge in the two test profiles.
++  const auto access = costing_->access_mode();
++  const bool test_profile = access == baldr::kBicycleAccess || access == baldr::kMopedAccess;
++  if (uturn_meta && (!disable_uturn || test_profile)) {
++    if (!disable_uturn) {
++      pred.set_deadend(true);
++    }
+ 
+     // TODO Is there a shortcut that supersedes our u-turn?
+     // Decide if we should expand a shortcut or the non-shortcut edge...
+--- a/src/thor/unidirectional_astar.cc
++++ b/src/thor/unidirectional_astar.cc
+@@ -99,8 +99,7 @@
+ 
+     // Begin by checking if this is the opposing edge to pred.
+     // If so, it means we are attempting a u-turn. In that case, lets wait with evaluating
+-    // this edge until last. If any other edges were emplaced, it means we should not
+-    // even try to evaluate a u-turn since u-turns should only happen for deadends
++    // this edge until last so we know whether the expansion reached a dead end.
+     uturn_meta = pred.opp_local_idx() == meta.edge->localedgeidx() ? meta : uturn_meta;
+ 
+     // Expand but only if this isnt the uturn, we'll try that later if nothing else works out
+@@ -139,10 +138,13 @@
+ 
+   // Now, after having looked at all the edges, including edges on other levels,
+   // we can say if this is a deadend or not, and if so, evaluate the uturn-edge (if it exists)
+-  if (!disable_uturn && uturn_meta) {
+-    // If we found no suitable edge to add, it means we're at a deadend
+-    // so lets go back and re-evaluate a potential u-turn
+-    pred.set_deadend(true);
++  // RoundNav experiment: evaluate a legal opposing edge in the two test profiles.
++  const auto access = costing_->access_mode();
++  const bool test_profile = access == baldr::kBicycleAccess || access == baldr::kMopedAccess;
++  if (uturn_meta && (!disable_uturn || test_profile)) {
++    if (!disable_uturn) {
++      pred.set_deadend(true);
++    }
+ 
+     // TODO Is there a shortcut that supersedes our u-turn?
+     // Decide if we should expand a shortcut or the non-shortcut edge...
