@@ -52,6 +52,7 @@ class BridgeService : Service() {
         internal const val ACTION_END_PLAYBACK = "com.example.roundnav.END_PLAYBACK"
         private const val EXTRA_PLAYBACK_ID = "playbackId"
         private const val EXTRA_PLAYBACK_POINTS = "playbackPoints"
+        private const val EXTRA_PLAYBACK_TURNS = "playbackTurns"
         private const val EXTRA_PLAYBACK_SPEED = "playbackSpeed"
         internal const val ROUTE_QUEUED = 1
         internal const val NINGBO_TEST_LAT = 29.8683
@@ -88,6 +89,7 @@ class BridgeService : Service() {
                 .setAction(ACTION_START_PLAYBACK)
                 .putExtra(EXTRA_PLAYBACK_ID, id)
                 .putExtra(EXTRA_PLAYBACK_POINTS, points)
+                .putExtra(EXTRA_PLAYBACK_TURNS, RouteTurn.encode(route.turns))
                 .putExtra(EXTRA_PLAYBACK_SPEED, speed))
         }
 
@@ -114,6 +116,8 @@ class BridgeService : Service() {
     }
     private val pendingWrites = ArrayDeque<Write>()
     private var pendingGps: Write? = null
+    private var pendingPlaybackNavigation: Write? = null
+    private var lastPlaybackNavigation: String? = null
     private var inFlight: Write? = null
     private var routeReceiver: ResultReceiver? = null
     private var writeAttempts = 0
@@ -292,7 +296,8 @@ class BridgeService : Service() {
             val speed = intent.getIntExtra(EXTRA_PLAYBACK_SPEED, 0)
             if (running && id != null) {
                 when (intent.action) {
-                    ACTION_START_PLAYBACK -> beginPlayback(id, intent.getDoubleArrayExtra(EXTRA_PLAYBACK_POINTS), speed)
+                    ACTION_START_PLAYBACK -> beginPlayback(id, intent.getDoubleArrayExtra(EXTRA_PLAYBACK_POINTS),
+                        RouteTurn.decode(intent.getIntArrayExtra(EXTRA_PLAYBACK_TURNS)), speed)
                     ACTION_TOGGLE_PLAYBACK -> playback?.takeIf { it.id == id }?.let(::togglePlayback)
                     ACTION_PLAYBACK_SPEED -> playback?.takeIf { it.id == id && speed in 5..15 }?.let {
                         advancePlayback(it, SystemClock.uptimeMillis())
@@ -305,6 +310,7 @@ class BridgeService : Service() {
                         } else {
                             playback = null
                             playbackStatus = null
+                            clearPlaybackNavigation()
                             status = status.copy(location = "沿线模拟已结束 · 停留在模拟位置")
                         }
                     }
@@ -421,7 +427,7 @@ class BridgeService : Service() {
 
     private fun resetConnection(message: String) {
         finishRouteSend("路线发送中断：$message。连接就绪后可重发")
-        playback?.let { failPlayback(it.id, "蓝牙已断开，连接就绪后可从起点重播") }
+        val interruptedPlayback = playback
         handler.removeCallbacks(connectionTimeout)
         handler.removeCallbacks(reconnect)
         cancelWriteTimeout()
@@ -433,6 +439,9 @@ class BridgeService : Service() {
         inFlight = null
         pendingWrites.clear()
         pendingGps = null
+        pendingPlaybackNavigation = null
+        lastPlaybackNavigation = null
+        interruptedPlayback?.let { failPlayback(it.id, "蓝牙已断开，连接就绪后可从起点重播") }
         writeAttempts = 0
         requestGeneration++
         fetchingRoads = false
@@ -486,7 +495,7 @@ class BridgeService : Service() {
         if (!queued) finishRouteSend("蓝牙队列繁忙或数据长度不足，请重试")
     }
 
-    private fun beginPlayback(id: String, points: DoubleArray?, speed: Int) {
+    private fun beginPlayback(id: String, points: DoubleArray?, turns: List<RouteTurn>, speed: Int) {
         if (txCharacteristic == null || routeReceiver != null) {
             failPlayback(id, "请等待蓝牙就绪及路线发送完成，再开始模拟")
             return
@@ -500,7 +509,7 @@ class BridgeService : Service() {
             failPlayback(id, "无法模拟，路线坐标无效")
             return
         }
-        val path = RoutePlayback(coordinates)
+        val path = RoutePlayback(coordinates, turns)
         if (path.totalMeters <= 0.0) {
             failPlayback(id, "起点和终点重合，请选择其他目的地")
             return
@@ -568,7 +577,8 @@ class BridgeService : Service() {
         }
         testMapLocation = location
         lastBearing = point.bearing
-        playbackStatus = PlaybackStatus(active.id, phase, point, active.traveled, active.path.totalMeters)
+        val guidance = active.path.guidanceAt(active.traveled)
+        playbackStatus = PlaybackStatus(active.id, phase, point, active.traveled, active.path.totalMeters, guidance = guidance)
         val progress = "${active.traveled.roundToInt()} / ${active.path.totalMeters.roundToInt()} 米"
         val action = when (phase) {
             PlaybackPhase.PAUSED -> "已暂停"
@@ -577,14 +587,28 @@ class BridgeService : Service() {
         }
         status = status.copy(location = "沿线模拟$action · $progress")
         queueGps(location)
+        queuePlaybackNavigation(guidance.bleLine())
     }
 
     private fun failPlayback(id: String, message: String) {
         val previous = playbackStatus?.takeIf { it.id == id }
         playback = null
-        playbackStatus = previous?.copy(phase = PlaybackPhase.FAILED, message = message)
+        playbackStatus = previous?.copy(phase = PlaybackPhase.FAILED, message = message, guidance = null)
             ?: PlaybackStatus(id, PlaybackPhase.FAILED, message = message)
         status = status.copy(location = "沿线模拟停止 · $message")
+        clearPlaybackNavigation()
+    }
+
+    private fun queuePlaybackNavigation(line: String) {
+        if (txCharacteristic == null || line == lastPlaybackNavigation) return
+        lastPlaybackNavigation = line
+        pendingPlaybackNavigation = Write(line)
+        drainQueue()
+    }
+
+    private fun clearPlaybackNavigation() {
+        if (lastPlaybackNavigation != null) queuePlaybackNavigation("S,-1,0")
+        lastPlaybackNavigation = null
     }
 
     private fun ResultReceiver.routeStatus(code: Int, message: String) =
@@ -631,7 +655,9 @@ class BridgeService : Service() {
 
     private fun drainQueue() {
         if (!running || gatt == null || txCharacteristic == null || inFlight != null) return
-        val next = pendingGps?.also { pendingGps = null } ?: pendingWrites.pollFirst() ?: return
+        val next = pendingGps?.also { pendingGps = null }
+            ?: pendingPlaybackNavigation?.also { pendingPlaybackNavigation = null }
+            ?: pendingWrites.pollFirst() ?: return
         inFlight = next
         writeAttempts = 0
         writeCurrent(next)
@@ -697,6 +723,7 @@ class BridgeService : Service() {
         sendingRoads = false
         pendingWrites.clear()
         pendingGps = null
+        clearPlaybackNavigation()
         loadedCenter = null
         nextRoadRequestMs = 0
         forceRoadRefresh = true

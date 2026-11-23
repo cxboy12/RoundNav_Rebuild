@@ -104,7 +104,7 @@ static int parse_line(char *line)
         ev.type = ROUNDNAV_EVENT_MAP_END;
         return post_event(&ev) ? 0 : -1;
     }
-    /* Turn instruction: L,meters,speed; R/S/U also accepted. */
+    /* L/R/S/U,meters,speed. S,0,0 marks arrival; S,-1,0 clears the cue. */
     if (sscanf(line, " %c , %d , %d", &kind, &a, &b) == 3) {
         kind = (char)toupper((unsigned char)kind);
         if (kind != 'L' && kind != 'R' && kind != 'S' && kind != 'U') return -1;

@@ -286,7 +286,8 @@ class MapActivity : ComponentActivity() {
             val route = RouteResult(
                 coordinates.toList().chunked(2).map { (lon, lat) -> lon to lat },
                 savedInstanceState.getDouble("routeDistance", Double.NaN).takeIf { it.isFinite() },
-                savedInstanceState.getDouble("routeDuration", Double.NaN).takeIf { it.isFinite() }
+                savedInstanceState.getDouble("routeDuration", Double.NaN).takeIf { it.isFinite() },
+                RouteTurn.decode(savedInstanceState.getIntArray("routeTurns"))
             )
             val origin = GeoPoint(savedInstanceState.getDouble("routeOriginLat"), savedInstanceState.getDouble("routeOriginLon"))
             showPreview(Preview(route, origin, savedInstanceState.getBoolean("routeIndoor"),
@@ -386,7 +387,7 @@ class MapActivity : ComponentActivity() {
             runOnUiThread {
                 if (isDestroyed || isFinishing || request != requestId) return@runOnUiThread
                 if (route == null) routeStatus.text = "$source · 规划失败：${error?.message ?: "没有路线"}"
-                else showPreview(Preview(route.copy(coordinates = RouteApi.displayCoordinates(route)), origin, indoor), fit = true)
+                else showPreview(Preview(RouteApi.displayRoute(route), origin, indoor), fit = true)
             }
         }
     }
@@ -507,7 +508,7 @@ class MapActivity : ComponentActivity() {
         val point = replay?.point
         val details = if (point == null) phaseText else {
             val progress = "${replay.traveledMeters.roundToLong()} / ${replay.totalMeters.roundToLong()} 米"
-            "$phaseText · $progress\n${BridgeService.status.roads}"
+            listOfNotNull("$phaseText · $progress", replay.guidance?.label, BridgeService.status.roads).joinToString("\n")
         }
         if (playbackInfo.text != details) playbackInfo.text = details
         if (point != null) {
@@ -599,6 +600,7 @@ class MapActivity : ComponentActivity() {
         selected?.let { out.putDouble("selectedLat", it.latitude); out.putDouble("selectedLon", it.longitude) }
         preview?.let { value ->
             out.putDoubleArray("routeCoordinates", value.route.coordinates.flatMap { listOf(it.first, it.second) }.toDoubleArray())
+            out.putIntArray("routeTurns", RouteTurn.encode(value.route.turns))
             out.putDouble("routeDistance", value.route.distanceKm ?: Double.NaN)
             out.putDouble("routeDuration", value.route.durationSeconds ?: Double.NaN)
             out.putDouble("routeOriginLat", value.origin.latitude)

@@ -36,7 +36,9 @@ public final class RoadMapChecks {
 
         double north = lat + .001;
         double east = lon + .001;
-        RoutePlayback playback = new RoutePlayback(road("route", lon, lat, lon, lat, lon, north, east, north).getPoints());
+        List<RouteTurn> turns = List.of(new RouteTurn(2, TurnDirection.RIGHT));
+        RoutePlayback playback = new RoutePlayback(
+            road("route", lon, lat, lon, lat, lon, north, east, north).getPoints(), turns);
         double cornerDistance = map.distanceMeters(lat, lon, north, lon);
         PlaybackPoint start = playback.pointAt(-5);
         verify(start.getLatitude() == lat && start.getLongitude() == lon && start.getBearing() == 0,
@@ -53,8 +55,33 @@ public final class RoadMapChecks {
         PlaybackPoint end = playback.pointAt(playback.getTotalMeters() + 15);
         verify(end.getLatitude() == north && end.getLongitude() == east && end.getBearing() == 90,
             "Playback stops at the last route point even when a step overshoots");
-        verify(new RoutePlayback(road("same point", lon, lat, lon, lat).getPoints()).getTotalMeters() == 0,
+        verify(new RoutePlayback(road("same point", lon, lat, lon, lat).getPoints(), List.of()).getTotalMeters() == 0,
             "A route with no movement has zero playback length");
+        verify(playback.guidanceAt(0).bleLine().equals("R,112,0") &&
+            playback.guidanceAt(cornerDistance - 0.1).bleLine().equals("R,1,0"),
+            "Turn countdown uses the shape index even if the route contains duplicate points");
+        verify(playback.guidanceAt(cornerDistance).bleLine().equals("S,-1,0") &&
+            playback.guidanceAt(playback.getTotalMeters() - 0.1).getMeters() == 1,
+            "Passed turns clear and the destination countdown remains positive before arrival");
+        verify(playback.guidanceAt(playback.getTotalMeters()).bleLine().equals("S,0,0"),
+            "Arrival uses the existing straight packet format with a reserved distance");
+        verify(RouteTurn.Companion.decode(RouteTurn.Companion.encode(turns)).equals(turns),
+            "Turns survive Activity state and service transport");
+
+        List<Pair<Double, Double>> guidanceShape = new ArrayList<>();
+        for (int i = 0; i < 1200; i++) guidanceShape.add(new Pair<>(lon + i * .00001, lat));
+        List<RouteTurn> longTurns = List.of(new RouteTurn(221, TurnDirection.LEFT), new RouteTurn(926, TurnDirection.U_TURN));
+        RouteResult sampled = RouteApi.INSTANCE.displayRoute(new RouteResult(guidanceShape, null, null, longTurns));
+        verify(sampled.getCoordinates().size() == 500 &&
+            sampled.getCoordinates().get(0).equals(guidanceShape.get(0)) &&
+            sampled.getCoordinates().get(499).equals(guidanceShape.get(1199)), "BLE capacity and both endpoints survive sampling");
+        for (int i = 0; i < longTurns.size(); i++) {
+            RouteTurn before = longTurns.get(i);
+            RouteTurn after = sampled.getTurns().get(i);
+            verify(after.getDirection() == before.getDirection() &&
+                sampled.getCoordinates().get(after.getShapeIndex()).equals(guidanceShape.get(before.getShapeIndex())),
+                "A sampled route keeps the original turn coordinate and remaps its index");
+        }
 
         NearbyRoad crossing = road("crossing", lon - .003, lat, lon + .003, lat);
         NearbyRoad nearby = road("nearby", lon + .001, lat, lon + .001, lat + .001);

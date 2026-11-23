@@ -346,6 +346,7 @@ static void draw_nav_arrow(void)
     if (s_direction == 'L') src = left;
     else if (s_direction == 'R') src = right;
     else if (s_direction == 'U') src = uturn;
+    const bool hide_arrow = s_direction == 'S' && s_distance_m <= 0;
     for (int i = 0; i < 3; ++i) {
         if (s_nav_arrow_lines[i] == NULL) {
             s_nav_arrow_lines[i] = lv_line_create(lv_screen_active());
@@ -354,8 +355,10 @@ static void draw_nav_arrow(void)
             lv_obj_set_style_line_color(s_nav_arrow_lines[i], lv_color_white(), 0);
             lv_obj_set_style_line_width(s_nav_arrow_lines[i], 6, 0);
             lv_obj_set_style_line_rounded(s_nav_arrow_lines[i], true, 0);
-            lv_obj_clear_flag(s_nav_arrow_lines[i], LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_clickable(s_nav_arrow_lines[i], false);
         }
+        lv_obj_set_hidden(s_nav_arrow_lines[i], hide_arrow);
+        if (hide_arrow) continue;
         s_nav_arrow_points[i][0] = src[i][0];
         s_nav_arrow_points[i][1] = src[i][1];
         lv_line_set_points(s_nav_arrow_lines[i], s_nav_arrow_points[i], 2);
@@ -370,10 +373,13 @@ static void update_nav_label(void)
     if (s_direction == 'L') word = "TURN LEFT";
     else if (s_direction == 'R') word = "TURN RIGHT";
     else if (s_direction == 'U') word = "U-TURN";
+    else if (s_distance_m == 0) word = "ARRIVED";
+    else if (s_distance_m < 0) word = "";
     lv_label_set_text(s_nav_label, word);
     draw_nav_arrow();
     char d[32];
-    if (s_distance_m < 0) snprintf(d, sizeof(d), "-- m");
+    if (s_direction == 'S' && s_distance_m <= 0) d[0] = '\0';
+    else if (s_distance_m < 0) snprintf(d, sizeof(d), "-- m");
     else if (s_distance_m >= 1000) snprintf(d, sizeof(d), "%.1f km", (double)s_distance_m / 1000.0);
     else snprintf(d, sizeof(d), "%ld m", (long)s_distance_m);
     lv_label_set_text(s_distance_label, d);
@@ -449,13 +455,13 @@ void nav_ui_init(void)
     create_map_surround(screen);
 
     s_nav_label = lv_label_create(screen);
-    lv_label_set_text(s_nav_label, "STRAIGHT");
+    lv_label_set_text(s_nav_label, "");
     lv_obj_set_style_text_color(s_nav_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(s_nav_label, LV_FONT_DEFAULT, 0);
     lv_obj_align(s_nav_label, LV_ALIGN_TOP_MID, 0, 52);
 
     s_distance_label = lv_label_create(screen);
-    lv_label_set_text(s_distance_label, "-- m");
+    lv_label_set_text(s_distance_label, "");
     lv_obj_set_style_text_color(s_distance_label, lv_color_hex(0xD4DCE5), 0);
     lv_obj_set_style_text_font(s_distance_label, LV_FONT_DEFAULT, 0);
     lv_obj_align(s_distance_label, LV_ALIGN_TOP_MID, 0, 82);
@@ -488,6 +494,9 @@ void nav_ui_set_ble_state(bool connected)
         s_pending_route_expected = 0;
         s_camera_animating = false;
         s_gps_valid = false; /* First fix after reconnect snaps to its actual location. */
+        s_direction = 'S';
+        s_distance_m = -1;
+        update_nav_label();
     }
     if (s_ble_label) {
         lv_label_set_text(s_ble_label, connected ? "BLE CONNECTED" : "BLE WAIT");
@@ -499,9 +508,15 @@ void nav_ui_set_ble_state(bool connected)
 void nav_ui_apply_nav(const roundnav_event_t *event)
 {
     if (event == NULL || !ui_lock()) return;
+    const bool new_direction = s_direction != event->direction;
     s_direction = event->direction;
     s_distance_m = event->distance_m;
     update_nav_label();
+    if (s_direction == 'S' && s_distance_m == 0) {
+        ESP_LOGI(TAG, "Navigation cue applied: arrival");
+    } else if (new_direction) {
+        ESP_LOGI(TAG, "Navigation cue applied: %c", s_direction);
+    }
     ui_unlock();
 }
 

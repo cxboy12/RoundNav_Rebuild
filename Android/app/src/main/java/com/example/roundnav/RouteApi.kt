@@ -9,7 +9,8 @@ import kotlin.math.roundToInt
 internal data class RouteResult(
     val coordinates: List<Pair<Double, Double>>, // longitude, latitude
     val distanceKm: Double?,
-    val durationSeconds: Double?
+    val durationSeconds: Double?,
+    val turns: List<RouteTurn> = emptyList()
 )
 
 /** Basic Valhalla motorcycle route request. The server's /ningbo/route endpoint must proxy Valhalla's native JSON API. */
@@ -62,6 +63,7 @@ internal object RouteApi {
         val trip = json.optJSONObject("trip")
         val legs = trip?.optJSONArray("legs") ?: json.optJSONArray("trip")
         val direct = json.optJSONArray("coordinates")
+        val turns = mutableListOf<RouteTurn>()
         val coordinates = when {
             direct != null -> List(direct.length()) { index ->
                 val point = direct.getJSONArray(index)
@@ -69,8 +71,25 @@ internal object RouteApi {
             }
             legs != null -> buildList {
                 for (index in 0 until legs.length()) {
-                    val points = decodePolyline6(legs.getJSONObject(index).getString("shape"))
-                    addAll(if (lastOrNull() == points.first()) points.drop(1) else points)
+                    val leg = legs.getJSONObject(index)
+                    val points = decodePolyline6(leg.getString("shape"))
+                    val sharedEndpoint = lastOrNull() == points.first()
+                    val offset = if (sharedEndpoint) size - 1 else size
+                    addAll(if (sharedEndpoint) points.drop(1) else points)
+                    val maneuvers = leg.optJSONArray("maneuvers") ?: continue
+                    for (i in 0 until maneuvers.length()) {
+                        val maneuver = maneuvers.optJSONObject(i) ?: continue
+                        val shapeIndex = maneuver.optInt("begin_shape_index", -1)
+                        if (shapeIndex !in points.indices) continue
+                        // Valhalla maneuver types for slight, normal and sharp turns, and U-turns.
+                        val direction = when (maneuver.optInt("type")) {
+                            in 9..11 -> TurnDirection.RIGHT
+                            12, 13 -> TurnDirection.U_TURN
+                            in 14..16 -> TurnDirection.LEFT
+                            else -> continue
+                        }
+                        turns.add(RouteTurn(offset + shapeIndex, direction))
+                    }
                 }
             }
             else -> emptyList()
@@ -85,7 +104,7 @@ internal object RouteApi {
             "miles" -> length?.times(1.609344)
             else -> null
         }
-        return RouteResult(coordinates, distanceKm, summary?.nonNegative("time"))
+        return RouteResult(coordinates, distanceKm, summary?.nonNegative("time"), turns)
     }
 
     private fun JSONObject.nonNegative(key: String) = optDouble(key).takeIf { it.isFinite() && it >= 0 }
@@ -116,17 +135,32 @@ internal object RouteApi {
         return points
     }
 
-    fun displayCoordinates(route: RouteResult): List<Pair<Double, Double>> {
+    fun displayRoute(route: RouteResult): RouteResult {
         val points = route.coordinates
         val limit = 500
-        return if (points.size <= limit) points else {
-            val step = (points.size - 1).toDouble() / (limit - 1).toDouble()
-            (0 until limit).map { points[(it * step).roundToInt()] }
+        if (points.size <= limit) return route
+
+        val endpoints = setOf(0, points.lastIndex)
+        val turnIndices = route.turns.map { it.shapeIndex }.toSet()
+        val keepTurns = (endpoints + turnIndices).size <= limit
+        val required = if (keepTurns) endpoints + turnIndices else endpoints
+        val candidates = points.indices.filterNot { it in required }
+        val available = limit - required.size
+        val selected = required.toMutableSet()
+        for (index in 0 until available) {
+            // Pick the midpoint of each equal-sized bucket of remaining points.
+            selected.add(candidates[((index + 0.5) * candidates.size / available).toInt()])
         }
+        val ordered = selected.sorted()
+        return route.copy(
+            coordinates = ordered.map { points[it] },
+            turns = if (keepTurns) route.turns.map { it.copy(shapeIndex = ordered.binarySearch(it.shapeIndex)) }
+                else emptyList()
+        )
     }
 
     fun toBleCommands(route: RouteResult): ArrayList<String> {
-        val selected = displayCoordinates(route)
+        val selected = displayRoute(route).coordinates
         val commands = arrayListOf("B,${selected.size}")
         selected.forEachIndexed { index, p ->
             val lon = p.first
