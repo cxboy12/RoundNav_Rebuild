@@ -202,6 +202,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     }()
     private let relaySize = ChoiceMenu(items: ["464", "448", "360"])
     private let relayFPS = ChoiceMenu(items: ["10", "15", "20", "25", "30"])
+    private lazy var relayLayout: ChoiceMenu = {
+        let menu = ChoiceMenu(items: ["圆屏完整", "居中铺满"])
+        menu.selectedSegmentIndex = UserDefaults.standard.integer(forKey: "roundNavRelayLayout") == 1 ? 1 : 0
+        return menu
+    }()
     private let relayKeepAliveSwitch = UISwitch()
     private lazy var relayStatus: StatusLabel = {
         let label = StatusLabel()
@@ -1121,7 +1126,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 fps: Int(roundNavFPS.selectedTitle) ?? 30,
                 quality: Int(roundNavQuality.selectedTitle) ?? 70,
                 orientation: orientations[max(0, roundNavRotation.selectedSegmentIndex)],
-                fit: roundNavFit.selectedSegmentIndex == 1)
+                layout: roundNavFit.selectedSegmentIndex == 1 ? .squareFit : .centerCrop)
         }
         if outputMode.usesInstrumentWiFi && outputMode != .roundNav {
             let screen = view.window?.screen ?? UIScreen.main
@@ -2642,11 +2647,13 @@ extension ReceiverViewController {
             relayDestination.isEnabled = !active
             relaySize.isEnabled = !active
             relayFPS.isEnabled = !active
+            relayLayout.isEnabled = !active
             return [SettingsSection(footer: "先在原版启动 H.264 和局域网接收页，再切回这里。原版地址留空时使用本机 Wi-Fi 地址和端口 9888。", [
                 .field("原版 HTTP 地址", relaySource, placeholder: "自动"),
                 .field("圆屏 IP", relayDestination),
                 .control("画面边长（像素）", icon: ("viewfinder", .systemIndigo), relaySize),
                 .control("发送帧率上限", icon: ("speedometer", .systemIndigo), relayFPS),
+                .control("画面布局", icon: ("aspectratio", .systemIndigo), relayLayout),
                 .control("切换 App 后继续转发", icon: ("lock.fill", .systemPurple), relayKeepAliveSwitch),
                 .action(active ? "停止转发" : "开始转发", icon: (active ? "stop.fill" : "play.fill", .systemIndigo)) {
                     [unowned self] in self.toggleRoundNavRelay()
@@ -2689,9 +2696,11 @@ extension ReceiverViewController {
         guard let url = source?.url else { return }
         UserDefaults.standard.set(sourceText, forKey: "roundNavRelaySource")
         UserDefaults.standard.set(destination, forKey: "roundNavRelayDestination")
+        UserDefaults.standard.set(relayLayout.selectedSegmentIndex, forKey: "roundNavRelayLayout")
         let generation = relayGeneration
         let settings = RoundNavOutput.Settings(host: destination, preferredSide: Int(relaySize.selectedTitle) ?? 464,
-            fps: Int(relayFPS.selectedTitle) ?? 10, quality: 70, orientation: .up, fit: false)
+            fps: Int(relayFPS.selectedTitle) ?? 10, quality: 70, orientation: .up,
+            layout: relayLayout.selectedSegmentIndex == 1 ? .centerCrop : .circleFit)
         let relay = RoundNavRelay(source: url, settings: settings) { [weak self] message in
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.relayGeneration == generation else { return }

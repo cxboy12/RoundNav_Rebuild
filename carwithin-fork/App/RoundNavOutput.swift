@@ -6,13 +6,19 @@ import Network
 import UniformTypeIdentifiers
 
 final class RoundNavOutput {
+    enum Layout: Equatable {
+        case centerCrop
+        case squareFit
+        case circleFit
+    }
+
     struct Settings {
         let host: String
         let preferredSide: Int
         let fps: Int
         let quality: Int
         let orientation: CGImagePropertyOrientation
-        let fit: Bool
+        let layout: Layout
     }
 
     private let settings: Settings
@@ -238,12 +244,24 @@ final class RoundNavOutput {
         let extent = source.extent
         let widthScale = side / extent.width
         let heightScale = side / extent.height
-        let scale = settings.fit ? min(widthScale, heightScale) : max(widthScale, heightScale)
+        let scale: CGFloat
+        switch settings.layout {
+        case .centerCrop:
+            scale = max(widthScale, heightScale)
+        case .squareFit:
+            scale = min(widthScale, heightScale)
+        case .circleFit:
+            // The fitted image diagonal must stay inside the physical circle.
+            let diagonal = (extent.width * extent.width + extent.height * extent.height).squareRoot()
+            scale = (side - 8) / diagonal
+        }
         let bounds = CGRect(x: 0, y: 0, width: side, height: side)
         let positioned = source.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
             .transformed(by: CGAffineTransform(translationX: side / 2 - extent.midX * scale,
                                                y: side / 2 - extent.midY * scale))
         let black = CIImage(color: .black).cropped(to: bounds)
+        let canvas = positioned.composited(over: black).cropped(to: bounds)
+        if settings.layout == .circleFit { return canvas }
         let mask = CIFilter(name: "CIRadialGradient", parameters: [
             "inputCenter": CIVector(x: side / 2, y: side / 2),
             "inputRadius0": side / 2 - 1,
@@ -251,8 +269,8 @@ final class RoundNavOutput {
             "inputColor0": CIColor(red: 1, green: 1, blue: 1),
             "inputColor1": CIColor(red: 0, green: 0, blue: 0)
         ])?.outputImage?.cropped(to: bounds)
-        guard let mask else { return positioned.composited(over: black).cropped(to: bounds) }
-        return positioned.composited(over: black).cropped(to: bounds).applyingFilter("CIBlendWithMask", parameters: [
+        guard let mask else { return canvas }
+        return canvas.applyingFilter("CIBlendWithMask", parameters: [
             kCIInputBackgroundImageKey: black, kCIInputMaskImageKey: mask
         ]).cropped(to: bounds)
     }
