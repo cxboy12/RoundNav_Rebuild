@@ -3,3 +3,6 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES bt nvs_flash lvgl esp32_s3_touch_amoled_1_75
 )
+
+# Optimize the RGB565 sampling loop even in an ESP-IDF debug build.
+set_source_files_properties(nav_ui.c PROPERTIES COMPILE_OPTIONS "-O2")

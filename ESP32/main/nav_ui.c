@@ -20,20 +20,43 @@
 #define CAMERA_SNAP_M 150.0
 #define ROAD_MARGIN_PX 128
 #define ROAD_BITMAP_PX (MAP_DIAMETER_PX + 2 * ROAD_MARGIN_PX)
+#define CACHE_SLICE_US 7000
+#define CACHE_ROWS_PER_BATCH 64
+#define CACHE_SEGMENTS_PER_BATCH 24
+#define SAMPLE_SHIFT 16
+#define SAMPLE_ONE (1 << SAMPLE_SHIFT)
 #define DEG_TO_RAD 0.017453292519943295
 #define NORTH_PIXELS_PER_E6 (DEG_TO_RAD * EARTH_M / 1000000.0 * MAP_RADIUS_PX / MAP_RADIUS_M)
 #define SCREEN_BG_RGB 0x111111
 #define MAP_BG_RGB 0x252525
 #define MAP_BORDER_RGB 0x4B4B4B
+#define ROUTE_RGB 0xBE75FF
 
 static const char *TAG = "RoundNavUI";
 
 static lv_obj_t *s_map_clip;
-static lv_obj_t *s_road_bitmap;
-static double s_bitmap_lat, s_bitmap_lon;
-static float s_bitmap_east_scale;
-static int s_bitmap_dx, s_bitmap_dy;
-static bool s_bitmap_valid;
+typedef struct {
+    double lat, lon;
+    float east_scale;
+} map_origin_t;
+
+typedef struct {
+    lv_obj_t *canvas;
+    uint16_t *pixels;
+    map_origin_t origin;
+} map_cache_t;
+
+static map_cache_t s_map_cache[2];
+static lv_obj_t *s_map_view;
+static uint16_t *s_view_pixels;
+static int s_view_stride, s_cache_stride;
+static uint16_t s_view_inset[MAP_DIAMETER_PX];
+static uint16_t s_map_background;
+static road_t *s_build_roads;
+static int s_cache_front;
+static bool s_cache_valid, s_cache_dirty;
+static int s_build_row, s_build_road = -1, s_build_point;
+static int s_view_dx, s_view_dy, s_view_heading = -1;
 static lv_obj_t *s_ble_label;
 static lv_obj_t *s_nav_label;
 static lv_obj_t *s_distance_label;
@@ -90,9 +113,10 @@ static struct {
 static bool ui_lock(void) { return bsp_display_lock(UINT32_MAX) == ESP_OK; }
 static void ui_unlock(void) { bsp_display_unlock(); }
 
-static float east_pixels_per_e6(void)
+static map_origin_t camera_origin(void)
 {
-    return NORTH_PIXELS_PER_E6 * cos(s_center_lat_e6 * DEG_TO_RAD / 1000000.0);
+    return (map_origin_t){s_center_lat_e6, s_center_lon_e6,
+                          NORTH_PIXELS_PER_E6 * cos(s_center_lat_e6 * DEG_TO_RAD / 1000000.0)};
 }
 
 static void set_map_heading(float heading)
@@ -106,13 +130,12 @@ static void set_map_heading(float heading)
     s_heading_sin = sinf(angle);
 }
 
-static void project_point(const geo_point_t *p, float east_scale, float cs, float sn,
+static void project_point(const geo_point_t *p, const map_origin_t *origin, float cs, float sn,
                           float center_px, lv_point_precise_t *out)
 {
-    if (!s_center_valid) { out->x = center_px; out->y = center_px; return; }
     /* Subtract in double before converting to float; preserve local detail. */
-    const float x = (float)(p->lon - s_center_lon_e6) * east_scale;
-    const float y = (float)(s_center_lat_e6 - p->lat) * (float)NORTH_PIXELS_PER_E6;
+    const float x = (float)(p->lon - origin->lon) * origin->east_scale;
+    const float y = (float)(origin->lat - p->lat) * (float)NORTH_PIXELS_PER_E6;
     /* A clockwise compass heading rotates the map counterclockwise. */
     out->x = (lv_coord_t)lroundf(center_px + x * cs + y * sn);
     out->y = (lv_coord_t)lroundf(center_px - x * sn + y * cs);
@@ -138,58 +161,137 @@ static int road_width(int road_class)
     return 2;
 }
 
-static void rebuild_road_bitmap(void)
+static void start_cache_build(map_cache_t *back)
 {
-    const int64_t started_us = esp_timer_get_time();
-    s_bitmap_lat = s_center_lat_e6;
-    s_bitmap_lon = s_center_lon_e6;
-    s_bitmap_east_scale = east_pixels_per_e6();
-    lv_canvas_fill_bg(s_road_bitmap, lv_color_hex(MAP_BG_RGB), LV_OPA_COVER);
-    for (int r = 0; r < ROAD_MAX_COUNT; ++r) {
-        const road_t *road = &s_road_store.roads[r];
-        if (!road->active || road->count < 2) continue;
-        lv_layer_t layer;
-        lv_canvas_init_layer(s_road_bitmap, &layer);
+    back->origin = camera_origin();
+    memcpy(s_build_roads, s_road_store.roads, sizeof(s_road_store.roads));
+    for (int x = 0; x < ROAD_BITMAP_PX; ++x) back->pixels[x] = s_map_background;
+    s_build_row = 1;
+    s_build_road = 0;
+    s_build_point = 1;
+    s_cache_dirty = false;
+}
+
+static void draw_cache_batch(const map_cache_t *back)
+{
+    if (s_build_row < ROAD_BITMAP_PX) {
+        const int limit = LV_MIN(s_build_row + CACHE_ROWS_PER_BATCH, ROAD_BITMAP_PX);
+        for (; s_build_row < limit; ++s_build_row) {
+            memcpy(back->pixels + s_build_row * s_cache_stride, back->pixels, ROAD_BITMAP_PX * sizeof(uint16_t));
+        }
+        return;
+    }
+
+    lv_layer_t layer;
+    lv_canvas_init_layer(back->canvas, &layer);
+    int budget = CACHE_SEGMENTS_PER_BATCH;
+    while (budget > 0 && s_build_road <= ROAD_MAX_COUNT) {
+        const bool route = s_build_road == ROAD_MAX_COUNT;
+        const road_t *road = route ? NULL : &s_build_roads[s_build_road];
+        const geo_point_t *points = route ? s_route : road->points;
+        const int count = route ? s_route_count : road->active ? road->count : 0;
+        if (s_build_point >= count) {
+            ++s_build_road;
+            s_build_point = 1;
+            continue;
+        }
         lv_draw_line_dsc_t line;
         lv_draw_line_dsc_init(&line);
-        line.color = road_color(road->road_class);
-        line.width = road_width(road->road_class);
+        line.color = route ? lv_color_hex(ROUTE_RGB) : road_color(road->road_class);
+        line.width = route ? 6 : road_width(road->road_class);
         line.round_start = line.round_end = true;
-        for (int i = 0; i < road->count; ++i) {
-            project_point(&road->points[i], s_bitmap_east_scale, 1.0f, 0.0f,
-                          ROAD_BITMAP_PX / 2, &line.p2);
-            if (i > 0) lv_draw_line(&layer, &line);
+        project_point(&points[s_build_point - 1], &back->origin, 1, 0, ROAD_BITMAP_PX / 2, &line.p1);
+        while (budget > 0 && s_build_point < count) {
+            project_point(&points[s_build_point++], &back->origin, 1, 0, ROAD_BITMAP_PX / 2, &line.p2);
+            lv_draw_line(&layer, &line);
             line.p1 = line.p2;
+            --budget;
         }
-        lv_canvas_finish_layer(s_road_bitmap, &layer);
     }
-    s_bitmap_valid = true;
-    const int64_t duration_us = esp_timer_get_time() - started_us;
-    if (duration_us > s_display_perf.rebuild_max_us) s_display_perf.rebuild_max_us = duration_us;
+    lv_canvas_finish_layer(back->canvas, &layer);
+}
+
+static void compose_map_view(const map_cache_t *front, int dx, int dy)
+{
+    if (dx == s_view_dx && dy == s_view_dy && s_heading_tenths == s_view_heading) return;
+    s_view_dx = dx;
+    s_view_dy = dy;
+    s_view_heading = s_heading_tenths;
+
+    const int radius = MAP_DIAMETER_PX / 2;
+    const int cx = ROAD_BITMAP_PX / 2 - dx;
+    const int cy = ROAD_BITMAP_PX / 2 - dy;
+    const int cs = (int)lroundf(s_heading_cos * SAMPLE_ONE);
+    const int sn = (int)lroundf(s_heading_sin * SAMPLE_ONE);
+    const bool covered = abs(dx) <= ROAD_MARGIN_PX && abs(dy) <= ROAD_MARGIN_PX;
+    const bool intersects = abs(dx) < ROAD_BITMAP_PX / 2 + radius && abs(dy) < ROAD_BITMAP_PX / 2 + radius;
+    /* Inverse sample only the circular viewport in native RGB565. The
+     * border and corners stay opaque, so LVGL only needs a plain image blit. */
+    for (int row = 0; row < MAP_DIAMETER_PX; ++row) {
+        const int inset = s_view_inset[row];
+        const int count = MAP_DIAMETER_PX - 2 * inset;
+        uint16_t *dest = s_view_pixels + row * s_view_stride + inset;
+        const int x = inset - radius;
+        const int y = row - radius;
+        if (covered && s_heading_tenths == 0) {
+            memcpy(dest, front->pixels + (cy + y) * s_cache_stride + cx + x, count * sizeof(*dest));
+            continue;
+        }
+        /* Skip sampling a stale cache after a long GPS jump. */
+        if (!intersects) {
+            for (int i = 0; i < count; ++i) dest[i] = s_map_background;
+            continue;
+        }
+        int sx = cx * SAMPLE_ONE + SAMPLE_ONE / 2 + x * cs - y * sn;
+        int sy = cy * SAMPLE_ONE + SAMPLE_ONE / 2 + x * sn + y * cs;
+        for (int i = 0; i < count; ++i) {
+            const int px = sx >> SAMPLE_SHIFT;
+            const int py = sy >> SAMPLE_SHIFT;
+            dest[i] = (covered || ((unsigned)px < ROAD_BITMAP_PX && (unsigned)py < ROAD_BITMAP_PX))
+                ? front->pixels[py * s_cache_stride + px] : s_map_background;
+            sx += cs;
+            sy += sn;
+        }
+    }
+    lv_obj_invalidate(s_map_view);
+}
+
+static void refresh_cached_map(void)
+{
+    if (!s_map_view || !s_center_valid) return;
+    map_cache_t *front = &s_map_cache[s_cache_front];
+    int dx = (int)lround((front->origin.lon - s_center_lon_e6) * front->origin.east_scale);
+    int dy = (int)lround((s_center_lat_e6 - front->origin.lat) * NORTH_PIXELS_PER_E6);
+    const int64_t started = esp_timer_get_time();
+    map_cache_t *back = &s_map_cache[1 - s_cache_front];
+    if (s_cache_dirty || (s_build_road < 0 && (!s_cache_valid || abs(dx) > ROAD_MARGIN_PX || abs(dy) > ROAD_MARGIN_PX))) {
+        start_cache_build(back);
+    }
+    if (s_build_road >= 0) {
+        /* A completed snapshot can replace the inputs between refreshes.
+         * Restart its back buffer, while the front buffer keeps moving. */
+        do {
+            draw_cache_batch(back);
+        } while (s_build_road <= ROAD_MAX_COUNT && esp_timer_get_time() - started < CACHE_SLICE_US);
+        if (s_build_road > ROAD_MAX_COUNT) {
+            s_build_road = -1;
+            s_cache_front = 1 - s_cache_front;
+            s_cache_valid = true;
+            s_view_heading = -1;
+            front = back;
+            dx = (int)lround((front->origin.lon - s_center_lon_e6) * front->origin.east_scale);
+            dy = (int)lround((s_center_lat_e6 - front->origin.lat) * NORTH_PIXELS_PER_E6);
+        }
+        const int64_t rebuild_us = esp_timer_get_time() - started;
+        if (rebuild_us > s_display_perf.rebuild_max_us) s_display_perf.rebuild_max_us = rebuild_us;
+    }
+    if (s_cache_valid) compose_map_view(front, dx, dy);
 }
 
 static void render_roads(bool refresh_style)
 {
-    if (s_map_clip == NULL) return;
-    if (s_road_bitmap) {
-        int dx = (int)lround((s_bitmap_lon - s_center_lon_e6) * s_bitmap_east_scale);
-        int dy = (int)lround((s_center_lat_e6 - s_bitmap_lat) * NORTH_PIXELS_PER_E6);
-        if (refresh_style || !s_bitmap_valid || abs(dx) > ROAD_MARGIN_PX || abs(dy) > ROAD_MARGIN_PX) {
-            rebuild_road_bitmap();
-            dx = dy = 0;
-        }
-        if (dx != s_bitmap_dx || dy != s_bitmap_dy) {
-            lv_obj_set_pos(s_road_bitmap, dx, dy);
-            /* The pivot tracks the vehicle inside the north-up cache and
-             * stays at screen center after the canvas is translated. */
-            lv_image_set_pivot(s_road_bitmap, ROAD_BITMAP_PX / 2 - dx, ROAD_BITMAP_PX / 2 - dy);
-            s_bitmap_dx = dx;
-            s_bitmap_dy = dy;
-        }
-        lv_image_set_rotation(s_road_bitmap, -s_heading_tenths);
-        return;
-    }
-    const float east_scale = east_pixels_per_e6();
+    if (s_map_view || !s_map_clip || !s_center_valid) return;
+    const map_origin_t origin = camera_origin();
     for (int r = 0; r < ROAD_MAX_COUNT; ++r) {
         road_t *road = &s_road_store.roads[r];
         if (!road->active || road->count < 2) {
@@ -197,7 +299,7 @@ static void render_roads(bool refresh_style)
             continue;
         }
         for (int i = 0; i < road->count; ++i) {
-            project_point(&road->points[i], east_scale, s_heading_cos, s_heading_sin,
+            project_point(&road->points[i], &origin, s_heading_cos, s_heading_sin,
                           MAP_RADIUS_PX, &s_road_screen[r][i]);
         }
 
@@ -220,20 +322,21 @@ static void render_roads(bool refresh_style)
 
 static void render_route(void)
 {
-    if (s_route_count < 2 || s_map_clip == NULL) {
+    if (s_map_view) return;
+    if (s_route_count < 2 || !s_map_clip || !s_center_valid) {
         if (s_route_line) lv_obj_add_flag(s_route_line, LV_OBJ_FLAG_HIDDEN);
         return;
     }
-    const float east_scale = s_bitmap_valid ? s_bitmap_east_scale : east_pixels_per_e6();
+    const map_origin_t origin = camera_origin();
     for (int i = 0; i < s_route_count; ++i) {
-        project_point(&s_route[i], east_scale, s_heading_cos, s_heading_sin,
+        project_point(&s_route[i], &origin, s_heading_cos, s_heading_sin,
                       MAP_RADIUS_PX, &s_route_screen[i]);
     }
     if (s_route_line == NULL) {
         s_route_line = lv_line_create(s_map_clip);
         lv_obj_set_size(s_route_line, MAP_DIAMETER_PX, MAP_DIAMETER_PX);
         lv_obj_center(s_route_line);
-        lv_obj_set_style_line_color(s_route_line, lv_color_hex(0xBE75FF), 0);
+        lv_obj_set_style_line_color(s_route_line, lv_color_hex(ROUTE_RGB), 0);
         lv_obj_set_style_line_width(s_route_line, 6, 0);
         lv_obj_set_style_line_rounded(s_route_line, true, 0);
         lv_obj_clear_flag(s_route_line, LV_OBJ_FLAG_CLICKABLE);
@@ -265,6 +368,15 @@ static void raise_map_overlays(void)
     for (int i = 0; i < MARKER_ROWS; ++i) lv_obj_move_foreground(s_marker_lines[i]);
 }
 
+static void wake_display(void)
+{
+    lv_timer_t *refresh = lv_display_get_refr_timer(lv_display_get_default());
+    if (refresh) {
+        lv_timer_resume(refresh);
+        lv_timer_ready(refresh);
+    }
+}
+
 /* Called with the LVGL lock held (timer callbacks already hold that lock). */
 static void advance_camera(uint32_t now)
 {
@@ -287,6 +399,7 @@ static void display_event(lv_event_t *event)
         /* Update immediately before LVGL examines invalid areas. One clock
          * drives both motion and drawing, avoiding independent timer phases. */
         advance_camera(lv_tick_get());
+        refresh_cached_map();
         const int64_t duration_us = esp_timer_get_time() - now_us;
         if (duration_us > s_display_perf.camera_max_us) s_display_perf.camera_max_us = duration_us;
         if (now_us - s_display_perf.window_start_us >= 5000000) {
@@ -313,7 +426,7 @@ static void display_event(lv_event_t *event)
     case LV_EVENT_REFR_READY:
         /* LVGL pauses its refresh timer at entry. Continue polling motion
          * even when subpixel progress has not invalidated any pixels yet. */
-        if (s_camera_animating) {
+        if (s_camera_animating || s_build_road >= 0 || (s_cache_dirty && s_center_valid)) {
             lv_timer_t *refresh = lv_display_get_refr_timer(lv_display_get_default());
             if (refresh) lv_timer_resume(refresh);
         }
@@ -434,6 +547,72 @@ static void create_map_surround(lv_obj_t *screen)
     ESP_LOGI(TAG, "Map clipping: static surround");
 }
 
+static lv_obj_t *create_rgb565_canvas(int size, int stride, uint16_t **pixels)
+{
+    *pixels = heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN, (size_t)stride * size * sizeof(**pixels),
+                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!*pixels) return NULL;
+    lv_obj_t *canvas = lv_canvas_create(s_map_clip);
+    if (!canvas) {
+        heap_caps_free(*pixels);
+        *pixels = NULL;
+        return NULL;
+    }
+    lv_canvas_set_buffer(canvas, *pixels, size, size, LV_COLOR_FORMAT_RGB565);
+    lv_obj_set_clickable(canvas, false);
+    return canvas;
+}
+
+static bool init_cached_map(void)
+{
+    s_cache_stride = lv_draw_buf_width_to_stride(ROAD_BITMAP_PX, LV_COLOR_FORMAT_RGB565) / sizeof(uint16_t);
+    s_view_stride = lv_draw_buf_width_to_stride(MAP_DIAMETER_PX, LV_COLOR_FORMAT_RGB565) / sizeof(uint16_t);
+    s_build_roads = heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN, sizeof(s_road_store.roads),
+                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_build_roads) return false;
+    for (int i = 0; i < 2; ++i) {
+        map_cache_t *cache = &s_map_cache[i];
+        cache->canvas = create_rgb565_canvas(ROAD_BITMAP_PX, s_cache_stride, &cache->pixels);
+        if (cache->canvas) lv_obj_set_hidden(cache->canvas, true);
+    }
+    if (s_map_cache[0].canvas && s_map_cache[1].canvas) {
+        s_map_view = create_rgb565_canvas(MAP_DIAMETER_PX, s_view_stride, &s_view_pixels);
+    }
+    if (!s_map_view) {
+        for (int i = 0; i < 2; ++i) {
+            map_cache_t *cache = &s_map_cache[i];
+            if (cache->canvas) lv_obj_delete(cache->canvas);
+            heap_caps_free(cache->pixels);
+        }
+        heap_caps_free(s_build_roads);
+        return false;
+    }
+
+    s_map_background = lv_color_to_u16(lv_color_hex(MAP_BG_RGB));
+    const uint16_t outside = lv_color_to_u16(lv_color_hex(SCREEN_BG_RGB));
+    const uint16_t border = lv_color_to_u16(lv_color_hex(MAP_BORDER_RGB));
+    const float inner_radius = MAP_RADIUS_PX - 2.0f;
+    for (int y = 0; y < MAP_DIAMETER_PX; ++y) {
+        s_view_inset[y] = MAP_DIAMETER_PX / 2;
+        const float dy = y + 0.5f - MAP_RADIUS_PX;
+        for (int x = 0; x < MAP_DIAMETER_PX; ++x) {
+            const float dx = x + 0.5f - MAP_RADIUS_PX;
+            const float distance_sq = dx * dx + dy * dy;
+            uint16_t color = outside;
+            if (distance_sq < inner_radius * inner_radius) {
+                color = s_map_background;
+                if (x < s_view_inset[y]) s_view_inset[y] = x;
+            } else if (distance_sq < MAP_RADIUS_PX * MAP_RADIUS_PX) {
+                color = border;
+            }
+            s_view_pixels[y * s_view_stride + x] = color;
+        }
+    }
+    lv_obj_center(s_map_view);
+    lv_obj_set_style_clip_corner(s_map_clip, false, 0);
+    return true;
+}
+
 void nav_ui_init(void)
 {
     if (!ui_lock()) { ESP_LOGE(TAG, "Could not lock LVGL during UI init"); return; }
@@ -453,23 +632,12 @@ void nav_ui_init(void)
     lv_obj_set_style_pad_all(s_map_clip, 0, 0);
     lv_obj_clear_flag(s_map_clip, LV_OBJ_FLAG_SCROLLABLE);
 
-    const size_t stride = lv_draw_buf_width_to_stride(ROAD_BITMAP_PX, LV_COLOR_FORMAT_RGB565);
-    void *pixels = heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN, stride * ROAD_BITMAP_PX,
-                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (pixels) {
-        s_road_bitmap = lv_canvas_create(s_map_clip);
-        if (s_road_bitmap) {
-            lv_canvas_set_buffer(s_road_bitmap, pixels, ROAD_BITMAP_PX, ROAD_BITMAP_PX, LV_COLOR_FORMAT_RGB565);
-            lv_canvas_fill_bg(s_road_bitmap, lv_color_hex(MAP_BG_RGB), LV_OPA_COVER);
-            lv_obj_center(s_road_bitmap);
-            lv_image_set_pivot(s_road_bitmap, ROAD_BITMAP_PX / 2, ROAD_BITMAP_PX / 2);
-            lv_image_set_antialias(s_road_bitmap, false);
-        } else {
-            heap_caps_free(pixels);
-        }
-    }
-    ESP_LOGI(TAG, "Road renderer: %s", s_road_bitmap ? "cached bitmap" : "vector fallback");
-    create_map_surround(screen);
+    lv_display_t *display = lv_display_get_default();
+    lv_timer_t *refresh = lv_display_get_refr_timer(display);
+    if (refresh) lv_timer_set_period(refresh, CAMERA_FRAME_MS);
+    s_camera_refresh_ready = refresh && lv_display_add_event_cb(display, display_event, LV_EVENT_ALL, NULL);
+    if (!s_camera_refresh_ready || !init_cached_map()) create_map_surround(screen);
+    ESP_LOGI(TAG, "Road renderer: %s", s_map_view ? "RGB565 cache" : "vector fallback");
 
     s_nav_label = lv_label_create(screen);
     lv_label_set_text(s_nav_label, "");
@@ -493,10 +661,6 @@ void nav_ui_init(void)
     s_route_count = 0;
     draw_nav_arrow();
     create_position_marker();
-    lv_display_t *display = lv_display_get_default();
-    lv_timer_t *refresh = lv_display_get_refr_timer(display);
-    if (refresh) lv_timer_set_period(refresh, CAMERA_FRAME_MS);
-    s_camera_refresh_ready = lv_display_add_event_cb(display, display_event, LV_EVENT_ALL, NULL) != NULL && refresh != NULL;
     s_display_perf.window_start_us = esp_timer_get_time();
     ESP_LOGI(TAG, "Display motion on LVGL refresh, period=%d ms, metrics=%s",
              CAMERA_FRAME_MS, s_camera_refresh_ready ? "enabled" : "unavailable");
@@ -557,8 +721,13 @@ void nav_ui_apply_map_event(const roundnav_event_t *event)
         if (s_pending_route_expected > 0 && s_pending_route_count == s_pending_route_expected) {
             s_route_count = s_pending_route_count;
             memcpy(s_route, s_pending_route, s_route_count * sizeof(*s_route));
-            render_route();
-            raise_map_overlays();
+            if (s_map_view) {
+                s_cache_dirty = true;
+                wake_display();
+            } else {
+                render_route();
+                raise_map_overlays();
+            }
             ESP_LOGI(TAG, "Route committed: points=%d", s_route_count);
         } else {
             ESP_LOGW(TAG, "Incomplete/invalid route; keeping previous route");
@@ -583,9 +752,14 @@ void nav_ui_apply_road_event(const roundnav_event_t *event)
     const int changed = road_store_apply(&s_road_store, event);
     if (changed < 0) ESP_LOGW(TAG, "Incomplete/invalid road batch; keeping previous roads");
     if (changed > 0) {
-        render_roads(true);
-        render_route();
-        raise_map_overlays();
+        if (s_map_view) {
+            s_cache_dirty = true;
+            wake_display();
+        } else {
+            render_roads(true);
+            render_route();
+            raise_map_overlays();
+        }
         if (event->type == ROUNDNAV_EVENT_ROAD_SNAPSHOT_END) {
             int active_roads = 0;
             for (int r = 0; r < ROAD_MAX_COUNT; ++r) {
@@ -623,19 +797,19 @@ void nav_ui_apply_gps(const roundnav_event_t *event)
     s_gps_valid = true;
     s_camera_animating = !snap && (fabs(s_camera_to_lat - s_camera_from_lat) > 0.001
         || fabs(s_camera_to_lon - s_camera_from_lon) > 0.001 || fabsf(s_heading_delta) > 0.01f);
-    if (s_camera_animating) {
-        lv_timer_t *refresh = lv_display_get_refr_timer(lv_display_get_default());
-        if (refresh) {
-            lv_timer_resume(refresh);
-            lv_timer_ready(refresh);
-        }
-    }
+    if (s_camera_animating) wake_display();
     if (snap) {
         s_center_lat_e6 = event->lat_e6;
         s_center_lon_e6 = event->lon_e6;
         set_map_heading((float)event->bearing_deg);
-        render_roads(false);
-        render_route();
+        if (s_map_view) {
+            s_cache_dirty = true;
+            wake_display();
+        } else {
+            render_roads(true);
+            render_route();
+            raise_map_overlays();
+        }
     }
     /* No extrapolation: stop at the last received fix if GPS/BLE stalls. */
     ui_unlock();
