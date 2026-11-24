@@ -22,6 +22,9 @@
 #define ROAD_BITMAP_PX (MAP_DIAMETER_PX + 2 * ROAD_MARGIN_PX)
 #define DEG_TO_RAD 0.017453292519943295
 #define NORTH_PIXELS_PER_E6 (DEG_TO_RAD * EARTH_M / 1000000.0 * MAP_RADIUS_PX / MAP_RADIUS_M)
+#define SCREEN_BG_RGB 0x111111
+#define MAP_BG_RGB 0x252525
+#define MAP_BORDER_RGB 0x4B4B4B
 
 static const char *TAG = "RoundNavUI";
 
@@ -34,8 +37,7 @@ static bool s_bitmap_valid;
 static lv_obj_t *s_ble_label;
 static lv_obj_t *s_nav_label;
 static lv_obj_t *s_distance_label;
-static lv_obj_t *s_nav_arrow_lines[3];
-static lv_point_precise_t s_nav_arrow_points[3][2];
+static lv_obj_t *s_nav_arrow_lines[2];
 static lv_obj_t *s_route_line;
 static lv_obj_t *s_road_lines[ROAD_MAX_COUNT];
 static lv_obj_t *s_marker_lines[MARKER_ROWS];
@@ -119,11 +121,11 @@ static void project_point(const geo_point_t *p, float east_scale, float cs, floa
 static lv_color_t road_color(int road_class)
 {
     switch (road_class) {
-    case 0: return lv_color_hex(0xA7B5C5); /* motorway */
-    case 1: return lv_color_hex(0x99A8BB); /* trunk */
-    case 2: return lv_color_hex(0x8A9BAE); /* primary */
-    case 3: return lv_color_hex(0x7B8DA0); /* secondary */
-    default: return lv_color_hex(0x687D92); /* local roads */
+    case 0: return lv_color_hex(0xF0EFEB); /* motorway */
+    case 1: return lv_color_hex(0xD7D5D1); /* trunk */
+    case 2: return lv_color_hex(0xB7B6B2); /* primary */
+    case 3: return lv_color_hex(0x999894); /* secondary */
+    default: return lv_color_hex(0x74736F); /* local roads */
     }
 }
 
@@ -142,7 +144,7 @@ static void rebuild_road_bitmap(void)
     s_bitmap_lat = s_center_lat_e6;
     s_bitmap_lon = s_center_lon_e6;
     s_bitmap_east_scale = east_pixels_per_e6();
-    lv_canvas_fill_bg(s_road_bitmap, lv_color_hex(0x0A1018), LV_OPA_COVER);
+    lv_canvas_fill_bg(s_road_bitmap, lv_color_hex(MAP_BG_RGB), LV_OPA_COVER);
     for (int r = 0; r < ROAD_MAX_COUNT; ++r) {
         const road_t *road = &s_road_store.roads[r];
         if (!road->active || road->count < 2) continue;
@@ -231,7 +233,7 @@ static void render_route(void)
         s_route_line = lv_line_create(s_map_clip);
         lv_obj_set_size(s_route_line, MAP_DIAMETER_PX, MAP_DIAMETER_PX);
         lv_obj_center(s_route_line);
-        lv_obj_set_style_line_color(s_route_line, lv_color_hex(0x48B8FF), 0);
+        lv_obj_set_style_line_color(s_route_line, lv_color_hex(0xBE75FF), 0);
         lv_obj_set_style_line_width(s_route_line, 6, 0);
         lv_obj_set_style_line_rounded(s_route_line, true, 0);
         lv_obj_clear_flag(s_route_line, LV_OBJ_FLAG_CLICKABLE);
@@ -344,24 +346,25 @@ static void display_event(lv_event_t *event)
 
 static void draw_nav_arrow(void)
 {
-    const lv_point_precise_t straight[3][2] = {
-        {{233, 39}, {233, 10}}, {{233, 10}, {222, 22}}, {{233, 10}, {244, 22}}
+    static const lv_point_precise_t straight[2][3] = {
+        {{233, 39}, {233, 10}}, {{222, 22}, {233, 10}, {244, 22}}
     };
-    const lv_point_precise_t left[3][2] = {
-        {{245, 25}, {217, 25}}, {{217, 25}, {228, 14}}, {{217, 25}, {228, 36}}
+    static const lv_point_precise_t left[2][3] = {
+        {{233, 39}, {233, 19}, {214, 19}}, {{224, 9}, {214, 19}, {224, 29}}
     };
-    const lv_point_precise_t right[3][2] = {
-        {{221, 25}, {249, 25}}, {{249, 25}, {238, 14}}, {{249, 25}, {238, 36}}
+    static const lv_point_precise_t right[2][3] = {
+        {{233, 39}, {233, 19}, {252, 19}}, {{242, 9}, {252, 19}, {242, 29}}
     };
-    const lv_point_precise_t uturn[3][2] = {
-        {{233, 10}, {233, 39}}, {{233, 39}, {222, 28}}, {{233, 39}, {244, 28}}
+    static const lv_point_precise_t uturn[2][3] = {
+        {{233, 10}, {233, 39}}, {{222, 28}, {233, 39}, {244, 28}}
     };
-    const lv_point_precise_t (*src)[2] = straight;
+    const lv_point_precise_t (*src)[3] = straight;
     if (s_direction == 'L') src = left;
     else if (s_direction == 'R') src = right;
     else if (s_direction == 'U') src = uturn;
+    const uint32_t shaft_count = (s_direction == 'L' || s_direction == 'R') ? 3 : 2;
     const bool hide_arrow = s_direction == 'S' && s_distance_m <= 0;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 2; ++i) {
         if (s_nav_arrow_lines[i] == NULL) {
             s_nav_arrow_lines[i] = lv_line_create(lv_screen_active());
             lv_obj_set_pos(s_nav_arrow_lines[i], 0, 0);
@@ -373,9 +376,7 @@ static void draw_nav_arrow(void)
         }
         lv_obj_set_hidden(s_nav_arrow_lines[i], hide_arrow);
         if (hide_arrow) continue;
-        s_nav_arrow_points[i][0] = src[i][0];
-        s_nav_arrow_points[i][1] = src[i][1];
-        lv_line_set_points(s_nav_arrow_lines[i], s_nav_arrow_points[i], 2);
+        lv_line_set_points(s_nav_arrow_lines[i], src[i], i == 0 ? shaft_count : 3);
         lv_obj_move_foreground(s_nav_arrow_lines[i]);
     }
 }
@@ -416,8 +417,8 @@ static void create_map_surround(lv_obj_t *screen)
             const float dx = x + 0.5f - MAP_RADIUS_PX;
             const float dy = y + 0.5f - MAP_RADIUS_PX;
             const float distance = sqrtf(dx * dx + dy * dy);
-            if (distance >= MAP_RADIUS_PX) row[x] = 0xFF05080D;
-            else if (distance >= MAP_RADIUS_PX - 2.0f) row[x] = 0xFF344252;
+            if (distance >= MAP_RADIUS_PX) row[x] = 0xFF000000 | SCREEN_BG_RGB;
+            else if (distance >= MAP_RADIUS_PX - 2.0f) row[x] = 0xFF000000 | MAP_BORDER_RGB;
             else row[x] = 0;
         }
     }
@@ -437,7 +438,7 @@ void nav_ui_init(void)
 {
     if (!ui_lock()) { ESP_LOGE(TAG, "Could not lock LVGL during UI init"); return; }
     lv_obj_t *screen = lv_screen_active();
-    lv_obj_set_style_bg_color(screen, lv_color_hex(0x05080D), 0);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(SCREEN_BG_RGB), 0);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
     s_map_clip = lv_obj_create(screen);
@@ -445,9 +446,9 @@ void nav_ui_init(void)
     lv_obj_align(s_map_clip, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_style_radius(s_map_clip, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_clip_corner(s_map_clip, true, 0);
-    lv_obj_set_style_bg_color(s_map_clip, lv_color_hex(0x0A1018), 0);
+    lv_obj_set_style_bg_color(s_map_clip, lv_color_hex(MAP_BG_RGB), 0);
     lv_obj_set_style_bg_opa(s_map_clip, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(s_map_clip, lv_color_hex(0x344252), 0);
+    lv_obj_set_style_border_color(s_map_clip, lv_color_hex(MAP_BORDER_RGB), 0);
     lv_obj_set_style_border_width(s_map_clip, 2, 0);
     lv_obj_set_style_pad_all(s_map_clip, 0, 0);
     lv_obj_clear_flag(s_map_clip, LV_OBJ_FLAG_SCROLLABLE);
@@ -459,7 +460,7 @@ void nav_ui_init(void)
         s_road_bitmap = lv_canvas_create(s_map_clip);
         if (s_road_bitmap) {
             lv_canvas_set_buffer(s_road_bitmap, pixels, ROAD_BITMAP_PX, ROAD_BITMAP_PX, LV_COLOR_FORMAT_RGB565);
-            lv_canvas_fill_bg(s_road_bitmap, lv_color_hex(0x0A1018), LV_OPA_COVER);
+            lv_canvas_fill_bg(s_road_bitmap, lv_color_hex(MAP_BG_RGB), LV_OPA_COVER);
             lv_obj_center(s_road_bitmap);
             lv_image_set_pivot(s_road_bitmap, ROAD_BITMAP_PX / 2, ROAD_BITMAP_PX / 2);
             lv_image_set_antialias(s_road_bitmap, false);
