@@ -1,5 +1,9 @@
 # RoundNav 项目交接
 
+## RoundNav Direct
+
+2026-11-24 开始 iPhone → Wi-Fi → ESP32-S3 直连开发。旧电脑中转源码经审计采用基线 JPEG 4:2:0、TCP v1，硬件代码对应 CO5300 466×466。已记录[基准](docs/BASELINE.md)、[协议](docs/VIDEO_PROTOCOL.md)和[实施方案](docs/DIRECT_STREAM_ARCHITECTURE.md)。[CarWithin 独立副本](carwithin-fork/ROUNDNAV.md)已接入原生帧输出，验证到主机协议模拟和工程引用。当前等候目标 ST77916 板型资料，以及 macOS/Xcode 构建与 iPhone 实机，详见[验证记录](docs/TEST_REPORT.md)。
+
 2026-11-24 更新。圆屏将旋转绘制和补图重建拆开，补图期间可继续跟随航向，直到新底图画完再整张切换。中央位置箭头固定朝上，室内模拟进入距下一处转弯 500 米内才提示转弯。用户此前目视发现的偶发左右提示不符，待用新版圆屏画面复核。解放南路掉头差异暂缓。
 
 ## 当前功能与证据
