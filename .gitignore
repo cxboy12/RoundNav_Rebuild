@@ -13,6 +13,9 @@ ESP32/build/
 ESP32/managed_components/
 ESP32/.vscode/
 ESP32/.clangd
+esp32-direct/sdkconfig
+esp32-direct/sdkconfig.old
+esp32-direct/managed_components/
 
 # Local backups, generated packages, and test output
 backups/

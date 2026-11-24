@@ -1,0 +1,50 @@
+menu "RoundNav Direct 圆屏接收端"
+
+    config DIPLAY_WIFI_SSID
+        string "要连接的 Wi-Fi 名称（留空则自建热点）"
+        default ""
+
+    config DIPLAY_WIFI_PASSWORD
+        string "Wi-Fi 密码"
+        default ""
+
+    config DIPLAY_AP_SSID
+        string "自建热点名称（留空自动生成 RoundNav-XXXX）"
+        default ""
+
+    config DIPLAY_AP_PASSWORD
+        string "自建热点密码（至少 8 位，留空为开放热点）"
+        default ""
+
+    config DIPLAY_AP_CHANNEL
+        int "自建热点信道"
+        range 1 13
+        default 6
+
+    config DIPLAY_TCP_PORT
+        int "推流 TCP 端口"
+        default 7000
+
+    config DIPLAY_DISCOVERY_PORT
+        int "局域网发现 UDP 广播端口"
+        default 7001
+
+    config DIPLAY_MAX_JPEG_KB
+        int "单帧 JPEG 上限 (KB)"
+        range 32 1024
+        default 256
+
+    config DIPLAY_RGB565_BIG_ENDIAN
+        bool "像素按 RGB565 大端发送（开机测试图颜色不对时取消勾选）"
+        default y
+
+    config DIPLAY_BRIGHTNESS
+        int "屏幕亮度 (%)"
+        range 1 100
+        default 80
+
+    config DIPLAY_BOOT_PATTERN
+        bool "开机显示色点和外圈，用于诊断面板"
+        default n
+
+endmenu
