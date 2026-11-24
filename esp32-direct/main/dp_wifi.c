@@ -70,7 +70,8 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
         ESP_LOGI(TAG, "有设备连上热点");
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STADISCONNECTED) {
-        ESP_LOGI(TAG, "有设备离开热点");
+        const wifi_event_ap_stadisconnected_t *event = data;
+        ESP_LOGI(TAG, "有设备离开热点，原因码 %u", (unsigned)event->reason);
     }
 }
 
@@ -128,8 +129,9 @@ esp_err_t dp_wifi_start(void)
         char ip[16];
         snprintf(ip, sizeof(ip), IPSTR, IP2STR(&info.ip));
         set_ip(ip);
-        ESP_LOGI(TAG, "开启热点 %s，IP=%s，推流端口 %d",
-                 (char *)wc.ap.ssid, ip, CONFIG_DIPLAY_TCP_PORT);
+        ESP_LOGI(TAG, "开启热点 %s，IP=%s，推流端口 %d，信道 %u，认证 %s",
+                 (char *)wc.ap.ssid, ip, CONFIG_DIPLAY_TCP_PORT, (unsigned)wc.ap.channel,
+                 wc.ap.authmode == WIFI_AUTH_WPA2_PSK ? "WPA2-PSK" : "OPEN");
     }
 
     ESP_ERROR_CHECK(esp_wifi_start());
