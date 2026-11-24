@@ -20,7 +20,8 @@
 #define CAMERA_SNAP_M 150.0
 #define ROAD_MARGIN_PX 128
 #define ROAD_BITMAP_PX (MAP_DIAMETER_PX + 2 * ROAD_MARGIN_PX)
-#define NORTH_PIXELS_PER_E6 (0.017453292519943295 * EARTH_M / 1000000.0 * MAP_RADIUS_PX / MAP_RADIUS_M)
+#define DEG_TO_RAD 0.017453292519943295
+#define NORTH_PIXELS_PER_E6 (DEG_TO_RAD * EARTH_M / 1000000.0 * MAP_RADIUS_PX / MAP_RADIUS_M)
 
 static const char *TAG = "RoundNavUI";
 
@@ -53,13 +54,14 @@ static double s_center_lon_e6;
 static bool s_center_valid;
 static bool s_gps_valid;
 static float s_heading_deg;
+static int s_heading_tenths;
+static float s_heading_cos = 1.0f, s_heading_sin;
 static double s_camera_from_lat, s_camera_from_lon;
 static double s_camera_to_lat, s_camera_to_lon;
 static float s_heading_from, s_heading_delta;
 static uint32_t s_camera_start, s_camera_duration, s_last_fix_tick;
 static bool s_camera_animating;
 static bool s_camera_refresh_ready;
-static float s_east_pixels_per_e6;
 static char s_direction = 'S';
 static int32_t s_distance_m = -1;
 
@@ -86,19 +88,32 @@ static struct {
 static bool ui_lock(void) { return bsp_display_lock(UINT32_MAX) == ESP_OK; }
 static void ui_unlock(void) { bsp_display_unlock(); }
 
-static void project_point(const geo_point_t *p, lv_point_precise_t *out)
+static float east_pixels_per_e6(void)
 {
-    if (!s_center_valid) { out->x = MAP_RADIUS_PX; out->y = MAP_RADIUS_PX; return; }
-    /* Subtract in double before converting to float; preserve local detail. */
-    out->x = (lv_coord_t)(MAP_RADIUS_PX + (float)(p->lon - s_center_lon_e6) * s_east_pixels_per_e6);
-    out->y = (lv_coord_t)(MAP_RADIUS_PX - (float)(p->lat - s_center_lat_e6) * NORTH_PIXELS_PER_E6);
+    return NORTH_PIXELS_PER_E6 * cos(s_center_lat_e6 * DEG_TO_RAD / 1000000.0);
 }
 
-static void update_projection_scale(void)
+static void set_map_heading(float heading)
 {
-    /* One cosine per redraw, rather than one per road point on every frame. */
-    s_east_pixels_per_e6 = 0.017453292519943295 * EARTH_M / 1000000.0 * MAP_RADIUS_PX / MAP_RADIUS_M
-        * cos(s_center_lat_e6 * 0.017453292519943295 / 1000000.0);
+    s_heading_deg = heading;
+    const int tenths = (int)lroundf(heading * 10.0f) % 3600;
+    if (tenths == s_heading_tenths) return;
+    s_heading_tenths = tenths;
+    const float angle = tenths * (float)(DEG_TO_RAD / 10.0);
+    s_heading_cos = cosf(angle);
+    s_heading_sin = sinf(angle);
+}
+
+static void project_point(const geo_point_t *p, float east_scale, float cs, float sn,
+                          float center_px, lv_point_precise_t *out)
+{
+    if (!s_center_valid) { out->x = center_px; out->y = center_px; return; }
+    /* Subtract in double before converting to float; preserve local detail. */
+    const float x = (float)(p->lon - s_center_lon_e6) * east_scale;
+    const float y = (float)(s_center_lat_e6 - p->lat) * (float)NORTH_PIXELS_PER_E6;
+    /* A clockwise compass heading rotates the map counterclockwise. */
+    out->x = (lv_coord_t)lroundf(center_px + x * cs + y * sn);
+    out->y = (lv_coord_t)lroundf(center_px - x * sn + y * cs);
 }
 
 static lv_color_t road_color(int road_class)
@@ -124,10 +139,9 @@ static int road_width(int road_class)
 static void rebuild_road_bitmap(void)
 {
     const int64_t started_us = esp_timer_get_time();
-    update_projection_scale();
     s_bitmap_lat = s_center_lat_e6;
     s_bitmap_lon = s_center_lon_e6;
-    s_bitmap_east_scale = s_east_pixels_per_e6;
+    s_bitmap_east_scale = east_pixels_per_e6();
     lv_canvas_fill_bg(s_road_bitmap, lv_color_hex(0x0A1018), LV_OPA_COVER);
     for (int r = 0; r < ROAD_MAX_COUNT; ++r) {
         const road_t *road = &s_road_store.roads[r];
@@ -140,9 +154,8 @@ static void rebuild_road_bitmap(void)
         line.width = road_width(road->road_class);
         line.round_start = line.round_end = true;
         for (int i = 0; i < road->count; ++i) {
-            project_point(&road->points[i], &line.p2);
-            line.p2.x += ROAD_MARGIN_PX;
-            line.p2.y += ROAD_MARGIN_PX;
+            project_point(&road->points[i], s_bitmap_east_scale, 1.0f, 0.0f,
+                          ROAD_BITMAP_PX / 2, &line.p2);
             if (i > 0) lv_draw_line(&layer, &line);
             line.p1 = line.p2;
         }
@@ -164,25 +177,32 @@ static void render_roads(bool refresh_style)
             dx = dy = 0;
         }
         if (dx != s_bitmap_dx || dy != s_bitmap_dy) {
-            lv_obj_set_pos(s_road_bitmap, dx - ROAD_MARGIN_PX, dy - ROAD_MARGIN_PX);
+            lv_obj_set_pos(s_road_bitmap, dx, dy);
+            /* The pivot tracks the vehicle inside the north-up cache and
+             * stays at screen center after the canvas is translated. */
+            lv_image_set_pivot(s_road_bitmap, ROAD_BITMAP_PX / 2 - dx, ROAD_BITMAP_PX / 2 - dy);
             s_bitmap_dx = dx;
             s_bitmap_dy = dy;
         }
+        lv_image_set_rotation(s_road_bitmap, -s_heading_tenths);
         return;
     }
-    update_projection_scale();
+    const float east_scale = east_pixels_per_e6();
     for (int r = 0; r < ROAD_MAX_COUNT; ++r) {
         road_t *road = &s_road_store.roads[r];
         if (!road->active || road->count < 2) {
             if (s_road_lines[r]) lv_obj_add_flag(s_road_lines[r], LV_OBJ_FLAG_HIDDEN);
             continue;
         }
-        for (int i = 0; i < road->count; ++i) project_point(&road->points[i], &s_road_screen[r][i]);
+        for (int i = 0; i < road->count; ++i) {
+            project_point(&road->points[i], east_scale, s_heading_cos, s_heading_sin,
+                          MAP_RADIUS_PX, &s_road_screen[r][i]);
+        }
 
         if (s_road_lines[r] == NULL) {
             s_road_lines[r] = lv_line_create(s_map_clip);
-            lv_obj_set_pos(s_road_lines[r], 0, 0);
             lv_obj_set_size(s_road_lines[r], MAP_DIAMETER_PX, MAP_DIAMETER_PX);
+            lv_obj_center(s_road_lines[r]);
             lv_obj_clear_flag(s_road_lines[r], LV_OBJ_FLAG_CLICKABLE);
         }
         lv_obj_remove_flag(s_road_lines[r], LV_OBJ_FLAG_HIDDEN);
@@ -202,12 +222,15 @@ static void render_route(void)
         if (s_route_line) lv_obj_add_flag(s_route_line, LV_OBJ_FLAG_HIDDEN);
         return;
     }
-    update_projection_scale();
-    for (int i = 0; i < s_route_count; ++i) project_point(&s_route[i], &s_route_screen[i]);
+    const float east_scale = s_bitmap_valid ? s_bitmap_east_scale : east_pixels_per_e6();
+    for (int i = 0; i < s_route_count; ++i) {
+        project_point(&s_route[i], east_scale, s_heading_cos, s_heading_sin,
+                      MAP_RADIUS_PX, &s_route_screen[i]);
+    }
     if (s_route_line == NULL) {
         s_route_line = lv_line_create(s_map_clip);
-        lv_obj_set_pos(s_route_line, 0, 0);
         lv_obj_set_size(s_route_line, MAP_DIAMETER_PX, MAP_DIAMETER_PX);
+        lv_obj_center(s_route_line);
         lv_obj_set_style_line_color(s_route_line, lv_color_hex(0x48B8FF), 0);
         lv_obj_set_style_line_width(s_route_line, 6, 0);
         lv_obj_set_style_line_rounded(s_route_line, true, 0);
@@ -217,32 +240,27 @@ static void render_route(void)
     lv_line_set_points(s_route_line, s_route_screen, s_route_count);
 }
 
-static void draw_position_marker(void)
+static void create_position_marker(void)
 {
-    if (s_map_clip == NULL) return;
-    const float angle = s_heading_deg * 0.017453292519943295f;
-    const float cs = cosf(angle), sn = sinf(angle);
     for (int i = 0; i < MARKER_ROWS; ++i) {
-        if (s_marker_lines[i] == NULL) {
-            s_marker_lines[i] = lv_line_create(s_map_clip);
-            lv_obj_set_pos(s_marker_lines[i], 0, 0);
-            lv_obj_set_size(s_marker_lines[i], MAP_DIAMETER_PX, MAP_DIAMETER_PX);
-            lv_obj_set_style_line_color(s_marker_lines[i], lv_color_white(), 0);
-            lv_obj_set_style_line_width(s_marker_lines[i], 2, 0);
-            lv_obj_set_style_line_rounded(s_marker_lines[i], true, 0);
-            lv_obj_clear_flag(s_marker_lines[i], LV_OBJ_FLAG_CLICKABLE);
-        }
-        const float local_y = -10.0f + 2.0f * i;
-        const float half = (float)i;
-        const float lx[2] = {-half, half};
-        for (int k = 0; k < 2; ++k) {
-            const float ly = local_y;
-            s_marker_points[i][k].x = (lv_coord_t)(MAP_RADIUS_PX + lx[k] * cs - ly * sn);
-            s_marker_points[i][k].y = (lv_coord_t)(MAP_RADIUS_PX + lx[k] * sn + ly * cs);
-        }
+        s_marker_lines[i] = lv_line_create(s_map_clip);
+        lv_obj_set_size(s_marker_lines[i], MAP_DIAMETER_PX, MAP_DIAMETER_PX);
+        lv_obj_center(s_marker_lines[i]);
+        lv_obj_set_style_line_color(s_marker_lines[i], lv_color_white(), 0);
+        lv_obj_set_style_line_width(s_marker_lines[i], 2, 0);
+        lv_obj_set_style_line_rounded(s_marker_lines[i], true, 0);
+        lv_obj_clear_flag(s_marker_lines[i], LV_OBJ_FLAG_CLICKABLE);
+        const int y = (int)MAP_RADIUS_PX - 10 + 2 * i;
+        s_marker_points[i][0] = (lv_point_precise_t){(int)MAP_RADIUS_PX - i, y};
+        s_marker_points[i][1] = (lv_point_precise_t){(int)MAP_RADIUS_PX + i, y};
         lv_line_set_points(s_marker_lines[i], s_marker_points[i], 2);
-        lv_obj_move_foreground(s_marker_lines[i]);
     }
+}
+
+static void raise_map_overlays(void)
+{
+    if (s_route_line) lv_obj_move_foreground(s_route_line);
+    for (int i = 0; i < MARKER_ROWS; ++i) lv_obj_move_foreground(s_marker_lines[i]);
 }
 
 /* Called with the LVGL lock held (timer callbacks already hold that lock). */
@@ -253,13 +271,9 @@ static void advance_camera(uint32_t now)
     const double t = elapsed >= s_camera_duration ? 1.0 : (double)elapsed / s_camera_duration;
     s_center_lat_e6 = s_camera_from_lat + (s_camera_to_lat - s_camera_from_lat) * t;
     s_center_lon_e6 = s_camera_from_lon + (s_camera_to_lon - s_camera_from_lon) * t;
-    const float heading = fmodf(s_heading_from + s_heading_delta * (float)t + 360.0f, 360.0f);
+    set_map_heading(fmodf(s_heading_from + s_heading_delta * (float)t + 360.0f, 360.0f));
     render_roads(false);
     render_route();
-    if (fabsf(heading - s_heading_deg) > 0.01f) {
-        s_heading_deg = heading;
-        draw_position_marker();
-    }
     if (t >= 1.0) s_camera_animating = false;
 }
 
@@ -446,7 +460,9 @@ void nav_ui_init(void)
         if (s_road_bitmap) {
             lv_canvas_set_buffer(s_road_bitmap, pixels, ROAD_BITMAP_PX, ROAD_BITMAP_PX, LV_COLOR_FORMAT_RGB565);
             lv_canvas_fill_bg(s_road_bitmap, lv_color_hex(0x0A1018), LV_OPA_COVER);
-            lv_obj_set_pos(s_road_bitmap, -ROAD_MARGIN_PX, -ROAD_MARGIN_PX);
+            lv_obj_center(s_road_bitmap);
+            lv_image_set_pivot(s_road_bitmap, ROAD_BITMAP_PX / 2, ROAD_BITMAP_PX / 2);
+            lv_image_set_antialias(s_road_bitmap, false);
         } else {
             heap_caps_free(pixels);
         }
@@ -475,7 +491,7 @@ void nav_ui_init(void)
     memset(&s_road_store, 0, sizeof(s_road_store));
     s_route_count = 0;
     draw_nav_arrow();
-    draw_position_marker();
+    create_position_marker();
     lv_display_t *display = lv_display_get_default();
     lv_timer_t *refresh = lv_display_get_refr_timer(display);
     if (refresh) lv_timer_set_period(refresh, CAMERA_FRAME_MS);
@@ -541,8 +557,7 @@ void nav_ui_apply_map_event(const roundnav_event_t *event)
             s_route_count = s_pending_route_count;
             memcpy(s_route, s_pending_route, s_route_count * sizeof(*s_route));
             render_route();
-            if (s_route_line) lv_obj_move_foreground(s_route_line);
-            draw_position_marker();
+            raise_map_overlays();
             ESP_LOGI(TAG, "Route committed: points=%d", s_route_count);
         } else {
             ESP_LOGW(TAG, "Incomplete/invalid route; keeping previous route");
@@ -569,8 +584,7 @@ void nav_ui_apply_road_event(const roundnav_event_t *event)
     if (changed > 0) {
         render_roads(true);
         render_route();
-        if (s_route_line) lv_obj_move_foreground(s_route_line);
-        draw_position_marker();
+        raise_map_overlays();
         if (event->type == ROUNDNAV_EVENT_ROAD_SNAPSHOT_END) {
             int active_roads = 0;
             for (int r = 0; r < ROAD_MAX_COUNT; ++r) {
@@ -618,10 +632,9 @@ void nav_ui_apply_gps(const roundnav_event_t *event)
     if (snap) {
         s_center_lat_e6 = event->lat_e6;
         s_center_lon_e6 = event->lon_e6;
-        s_heading_deg = (float)event->bearing_deg;
+        set_map_heading((float)event->bearing_deg);
         render_roads(false);
         render_route();
-        draw_position_marker();
     }
     /* No extrapolation: stop at the last received fix if GPS/BLE stalls. */
     ui_unlock();
