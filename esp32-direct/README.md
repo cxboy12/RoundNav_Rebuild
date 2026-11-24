@@ -6,4 +6,4 @@
 
 默认热点名为 `RoundNav-XXXX`，后四位取 AP MAC 地址末尾，接收地址为 `192.168.4.1:7000`。在 `idf.py menuconfig` 的「RoundNav Direct 圆屏接收端」可配置热点密码、信道和开机诊断图。本地 `sdkconfig` 不入库。iPhone 端参见 [RoundNav 输出设置](../carwithin-fork/ROUNDNAV.md)。
 
-启动后清屏为黑色。正常推流在 `(52,52)` 显示 360×360 JPEG，面板要求 x/y 偶数。串口分开报告完整接收和显示提交，刷屏提交耗时包含等待、复制和 DMA 提交。实测记录见 [TEST_REPORT.md](../docs/TEST_REPORT.md)。
+启动后清屏为黑色。接收器支持尺寸为 8 的倍数、x/y 为偶数且落在面板内的 JPEG。464×464 从 `(0,0)` 绘制，360×360 从 `(52,52)` 绘制。串口分开报告完整接收和显示提交，刷屏提交耗时包含等待、复制和 DMA 提交。实测记录见 [TEST_REPORT.md](../docs/TEST_REPORT.md)。

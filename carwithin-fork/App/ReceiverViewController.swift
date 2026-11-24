@@ -181,6 +181,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let keepAliveSwitch = UISwitch()
     private let headUnitOutput = ChoiceMenu(items: ["浏览器", "CarLife", "AirPlay", "台铃 4.3 寸", "九号 5 寸", "极核 6.2 寸", "九号 7 寸", "九号 4.3 寸（实验）", "RoundNav ESP32"])
     private let roundNavAddress = UITextField()
+    private let roundNavSize = ChoiceMenu(items: ["464", "448", "360"])
     private let roundNavFPS = ChoiceMenu(items: ["10", "15", "20", "25", "30"])
     private let roundNavQuality = ChoiceMenu(items: ["40", "50", "60", "70", "80", "90"])
     private let roundNavRotation = ChoiceMenu(items: ["0°", "90°", "180°", "270°"])
@@ -1089,6 +1090,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             let orientations: [CGImagePropertyOrientation] = [.up, .right, .down, .left]
             config.roundNav = RoundNavOutput.Settings(
                 host: (roundNavAddress.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                preferredSide: Int(roundNavSize.selectedTitle) ?? 464,
                 fps: Int(roundNavFPS.selectedTitle) ?? 30,
                 quality: Int(roundNavQuality.selectedTitle) ?? 70,
                 orientation: orientations[max(0, roundNavRotation.selectedSegmentIndex)],
@@ -1711,7 +1713,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         ninebot43AddressField.isEnabled = value
         tailingAddressField.isEnabled = value
         roundNavAddress.isEnabled = value
-        [roundNavFPS, roundNavQuality, roundNavRotation, roundNavFit].forEach { $0.isEnabled = value }
+        [roundNavSize, roundNavFPS, roundNavQuality, roundNavRotation, roundNavFit].forEach { $0.isEnabled = value }
         carLifeAddressField.isEnabled = value
     }
     @objc private func willResignActive() {
@@ -1955,11 +1957,12 @@ extension ReceiverViewController {
         roundNavAddress.text = defaults.string(forKey: "roundNavAddress") ?? "192.168.4.1"
         roundNavAddress.keyboardType = .numbersAndPunctuation
         roundNavAddress.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
+        roundNavSize.selectedSegmentIndex = min(2, max(0, defaults.integer(forKey: "roundNavSize")))
         roundNavFPS.selectedSegmentIndex = min(4, max(0, defaults.object(forKey: "roundNavFPS") as? Int ?? 4))
         roundNavQuality.selectedSegmentIndex = min(5, max(0, defaults.object(forKey: "roundNavQuality") as? Int ?? 3))
         roundNavRotation.selectedSegmentIndex = min(3, max(0, defaults.integer(forKey: "roundNavRotation")))
         roundNavFit.selectedSegmentIndex = min(1, max(0, defaults.integer(forKey: "roundNavFit")))
-        [roundNavFPS, roundNavQuality, roundNavRotation, roundNavFit].forEach {
+        [roundNavSize, roundNavFPS, roundNavQuality, roundNavRotation, roundNavFit].forEach {
             $0.addTarget(self, action: #selector(saveHeadUnitOutput), for: .valueChanged)
         }
         carLifeAddressField.text = defaults.string(forKey: "carLifeAddress")
@@ -2008,6 +2011,7 @@ extension ReceiverViewController {
         UserDefaults.standard.set(ninebot43AddressField.text ?? "", forKey: "ninebot43Address")
         UserDefaults.standard.set(tailingAddressField.text ?? "", forKey: "tailingAddress")
         UserDefaults.standard.set(roundNavAddress.text ?? "", forKey: "roundNavAddress")
+        UserDefaults.standard.set(roundNavSize.selectedSegmentIndex, forKey: "roundNavSize")
         UserDefaults.standard.set(roundNavFPS.selectedSegmentIndex, forKey: "roundNavFPS")
         UserDefaults.standard.set(roundNavQuality.selectedSegmentIndex, forKey: "roundNavQuality")
         UserDefaults.standard.set(roundNavRotation.selectedSegmentIndex, forKey: "roundNavRotation")
@@ -2596,6 +2600,7 @@ extension ReceiverViewController {
             case .roundNav:
                 return [SettingsSection("RoundNav ESP32", footer: "让 iPhone 加入 RoundNav 热点，再启动 CarPlay。视频发送到 TCP 7000，声音由 iPhone 或蓝牙输出。", [
                     .field("接收端 IP 地址", roundNavAddress),
+                    .control("画面边长（像素）", icon: ("viewfinder", .systemIndigo), roundNavSize),
                     .control("发送帧率上限", icon: ("speedometer", .systemIndigo), roundNavFPS),
                     .control("JPEG 质量", icon: ("photo", .systemIndigo), roundNavQuality),
                     .control("画面旋转", icon: ("rotate.right", .systemIndigo), roundNavRotation),

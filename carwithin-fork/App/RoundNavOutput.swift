@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 final class RoundNavOutput {
     struct Settings {
         let host: String
+        let preferredSide: Int
         let fps: Int
         let quality: Int
         let orientation: CGImagePropertyOrientation
@@ -316,7 +317,7 @@ final class RoundNavOutput {
     private func readHello(_ socket: NWConnection) {
         receive(16, from: socket) { [weak self] bytes in
             guard let self else { return }
-            guard let geometry = Geometry(bytes) else {
+            guard let geometry = Geometry(bytes, preferredSide: self.settings.preferredSide) else {
                 self.disconnect(socket, reason: "DiPlay 握手不兼容")
                 return
             }
@@ -424,14 +425,14 @@ final class RoundNavOutput {
         let side: Int
         let maximum: Int
 
-        init?(_ bytes: Data) {
+        init?(_ bytes: Data, preferredSide: Int) {
             guard bytes.prefix(4).elementsEqual("DPHI".utf8), bytes.uint16LE(12) == 1 else { return nil }
             let width = Int(bytes.uint16LE(4))
             let height = Int(bytes.uint16LE(6))
             let alignment = Int(bytes.uint16LE(14))
             maximum = Int(bytes.uint32LE(8))
             guard alignment == 8 || alignment == 16, maximum > 0 else { return nil }
-            side = min(width, height, 360) / alignment * alignment
+            side = min(width, height, preferredSide) / alignment * alignment
             guard side >= alignment else { return nil }
             x = UInt16(((width - side) / 2) & ~1)
             y = UInt16(((height - side) / 2) & ~1)

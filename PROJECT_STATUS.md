@@ -2,9 +2,9 @@
 
 ## RoundNav Direct
 
-2026-11-24 开始 iPhone → Wi-Fi → ESP32-S3 直连开发。旧电脑中转源码经审计采用基线 JPEG 4:2:0、TCP v1，已记录[基准](docs/BASELINE.md)、[协议](docs/VIDEO_PROTOCOL.md)和[实施方案](docs/DIRECT_STREAM_ARCHITECTURE.md)。[CarWithin 独立副本](carwithin-fork/ROUNDNAV.md)已接入原生帧输出，主机协议模拟和工程引用检查通过。用户确认使用微雪 1.75 英寸 AMOLED，面板为 466×466 CO5300。[独立直连固件](esp32-direct/README.md)采用居中 360×360 视频区域，ESP-IDF 5.5.6 构建通过。iOS 构建及双设备验收见[验证记录](docs/TEST_REPORT.md)。
+2026-11-24 开始 iPhone → Wi-Fi → ESP32-S3 直连开发。旧电脑中转源码经审计采用基线 JPEG 4:2:0、TCP v1，已记录[基准](docs/BASELINE.md)、[协议](docs/VIDEO_PROTOCOL.md)和[实施方案](docs/DIRECT_STREAM_ARCHITECTURE.md)。[CarWithin 独立副本](carwithin-fork/ROUNDNAV.md)已接入原生帧输出，主机协议模拟和工程引用检查通过。用户确认使用微雪 1.75 英寸 AMOLED，面板为 466×466 CO5300。[独立直连固件](esp32-direct/README.md)通过 ESP-IDF 5.5.6 构建。根据用户试屏反馈，CarWithin 源码默认尺寸改为 464×464，另有 448×448 和 360×360。iOS 构建及双设备验收见[验证记录](docs/TEST_REPORT.md)。
 
-经用户授权，已备份微雪板完整 16 MiB Flash 并比对分区表，只更新 COM3 板的 factory 应用分区。写入哈希验证通过。重启后串口确认 RoundNav Direct、466×466 面板、RoundNav 热点和 TCP 7000 服务均启动。Windows 测试帧、iOS 构建与两设备联调待完成。
+经用户授权，已备份微雪板完整 16 MiB Flash 并比对分区表，只更新 COM3 板的 factory 应用分区。写入哈希验证通过。重启后串口确认 RoundNav Direct、466×466 面板、RoundNav 热点和 TCP 7000 服务均启动。用户用 Windows 发 50 张 360×360 测试图，收到 50 个成功 ACK，发送端报告平均 10.1 FPS。用户观察画面区域偏小。下一步验证 464×464 的面板观感和性能，同时准备 iOS 构建。
 
 2026-11-24 更新。圆屏将旋转绘制和补图重建拆开，补图期间可继续跟随航向，直到新底图画完再整张切换。中央位置箭头固定朝上，室内模拟进入距下一处转弯 500 米内才提示转弯。用户此前目视发现的偶发左右提示不符，待用新版圆屏画面复核。解放南路掉头差异暂缓。
 

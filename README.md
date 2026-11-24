@@ -4,7 +4,7 @@
 
 ## RoundNav Direct
 
-[CarWithin 开发副本](carwithin-fork/ROUNDNAV.md) 增加「RoundNav ESP32」输出，读取 App 内部视频帧，通过 DiPlay JPEG/TCP v1 向 ESP32 推送。[独立直连固件](esp32-direct/README.md) 面向微雪 ESP32-S3 1.75 英寸 AMOLED，使用 466×466 CO5300 面板显示居中的 360×360 视频。
+[CarWithin 开发副本](carwithin-fork/ROUNDNAV.md) 增加「RoundNav ESP32」输出，读取 App 内部视频帧，通过 DiPlay JPEG/TCP v1 向 ESP32 推送。[独立直连固件](esp32-direct/README.md) 面向微雪 ESP32-S3 1.75 英寸 AMOLED，使用 466×466 CO5300 面板。CarWithin 默认输出 464×464，可选 448×448 或 360×360。
 
 - [电脑中转源码审计](docs/CURRENT_PIPELINE.md)和[性能基准](docs/BASELINE.md)
 - [CarWithin 原生输出审计](docs/CARWITHIN_ANALYSIS.md)和[实施方案](docs/DIRECT_STREAM_ARCHITECTURE.md)
