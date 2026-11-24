@@ -43,7 +43,7 @@ jobs:
           app="$package/Payload/TDSCarKit.app"
           plutil -replace CFBundleDisplayName -string 'CarWithin RoundNav' "$app/Info.plist"
           executable="$(plutil -extract CFBundleExecutable raw "$app/Info.plist")"
-          lipo -verify_arch arm64 "$app/$executable"
+          lipo "$app/$executable" -verify_arch arm64
           ditto -c -k --keepParent "$package/Payload" "$RUNNER_TEMP/CarWithin-RoundNav-unsigned.ipa"
           unzip -tq "$RUNNER_TEMP/CarWithin-RoundNav-unsigned.ipa"
       - name: Upload IPA
