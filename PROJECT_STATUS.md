@@ -6,7 +6,7 @@
 
 经用户授权，已备份微雪板完整 16 MiB Flash 并比对分区表，只更新 COM3 板的 factory 应用分区。写入哈希验证通过。重启后串口确认 RoundNav Direct、466×466 面板、RoundNav 热点和 TCP 7000 服务均启动。用户用 Windows 分别发送 50 张 360×360 和 464×464 测试图，两组均收到 50 个成功 ACK，发送端各报告平均 10.1 FPS。用户目视确认 464×464 画面大小合适。
 
-GitHub Actions 已用 Xcode 16.4 构建 iOS Release 真机版，arm64 架构和 IPA 压缩包校验通过。[下载未签名 IPA](https://github.com/cxboy12/RoundNav_Rebuild/actions/runs/45369105491/artifacts/14907693366)。下一步是在 Windows 侧载「CarWithin RoundNav」并用 iPhone 验证首次推流。
+原生输出版 IPA 已安装，用户报告独立 App 提示导入 MFi 身份。用户确认原版可启动 CarPlay，切到后台也可继续提供视频。新增「设置 → 原版视频转发」，通过同机 WebSocket 接收原版 H.264，复用 464×464 JPEG 发送端。新版 iOS Release 真机编译、arm64 和包完整性校验通过，待 iPhone 验证首帧。[下载转发版 IPA](https://github.com/cxboy12/RoundNav_Rebuild/actions/runs/45409294182/artifacts/14926404840)
 
 2026-11-24 更新。圆屏将旋转绘制和补图重建拆开，补图期间可继续跟随航向，直到新底图画完再整张切换。中央位置箭头固定朝上，室内模拟进入距下一处转弯 500 米内才提示转弯。用户此前目视发现的偶发左右提示不符，待用新版圆屏画面复核。解放南路掉头差异暂缓。
 

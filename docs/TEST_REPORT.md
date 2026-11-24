@@ -8,6 +8,7 @@
 | 上游版本和工程接线 | 逐项核对上游快照，除本次集成修改的四个文件外，原 128 个文件内容一致（允许换行格式差异）。核对了 Xcode 项目中的新源码引用及编译阶段。 |
 | 主机协议模拟 | 用 Python、Pillow 和原 `fake_receiver.py` 的协议与解码函数，验证 16/16/20 字节报文、基线 JPEG 4:2:0 SOF 字段、拆段读取及 ACK。两种握手的物理面板均为 466×466，对齐 16 时模拟 352×352 @ (56,56)，对齐 8 时模拟 360×360 @ (52,52)。 |
 | iOS 构建和编码 | GitHub Actions 用 macOS 15 Intel 和 Xcode 16.4 成功编译 iOS Release 真机目标。验证了可执行文件的 arm64 架构和 IPA 压缩包完整性，并上传了提交 `2245da6` 的产物。签名侧载、配件认证、iPhone 的 ImageIO JPEG 输出及直连待验证。 [构建记录](https://github.com/cxboy12/RoundNav_Rebuild/actions/runs/45369105491) |
+| 同机视频转发 | 用户已安装初版并报告 MFi 提示，确认原版在后台可以继续出流。新入口通过原版 WebSocket 帧协议接收 H.264。主机核对 WebSocket 帧头和样本边界，检查 SPS/PPS 与 IDR 的 Annex B 组合及 Xcode 文件引用。新版真机编译、arm64 检查和 IPA 打包上传成功。原版到转发 App 的同机连接和圆屏实显待验收。 [新版构建](https://github.com/cxboy12/RoundNav_Rebuild/actions/runs/45409294182) |
 | ESP32 构建 | ESP-IDF 5.5.6 构建通过。应用镜像 `esp32-direct/build/roundnav_direct.bin` 为 885,968 字节。esptool 确认芯片目标为 ESP32-S3，校验和及验证哈希有效。 |
 | ESP32 写入与启动 | 经用户授权，读取完整 16 MiB Flash，核验备份大小、原应用镜像标识并确认板上分区表与构建产物一致。通过 COM3 仅写入 `0x10000` factory 应用分区，写入哈希通过。重启串口核验新应用、466×466 面板初始化、`RoundNav-XXXX` 热点 `192.168.4.1` 与 TCP 7000 监听。 |
 | Windows → ESP32 试屏 | 用户发送 50 张 360×360 合成 JPEG，位置 (52,52)，收到 50 个成功 ACK，发送端报告平均 10.1 FPS。JPEG 约 9.6–9.7 KiB，ESP 解码 13.4 ms，整帧 17.7 ms，往返 25.6–32.2 ms。用户观察画面区域偏小，最后 8 行及颜色待专项检查。 |
