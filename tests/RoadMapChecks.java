@@ -60,13 +60,27 @@ public final class RoadMapChecks {
         verify(playback.guidanceAt(0).bleLine().equals("R,112,0") &&
             playback.guidanceAt(cornerDistance - 0.1).bleLine().equals("R,1,0"),
             "Turn countdown uses the shape index even if the route contains duplicate points");
-        verify(playback.guidanceAt(cornerDistance).bleLine().equals("S,-1,0") &&
-            playback.guidanceAt(playback.getTotalMeters() - 0.1).getMeters() == 1,
-            "Passed turns clear and the destination countdown remains positive before arrival");
+        verify(playback.guidanceAt(cornerDistance).getDirection() == null &&
+            playback.guidanceAt(playback.getTotalMeters() - 0.1).bleLine().equals("S,1,0"),
+            "Passing the final turn shows straight with the distance to the destination");
         verify(playback.guidanceAt(playback.getTotalMeters()).bleLine().equals("S,0,0"),
             "Arrival uses the existing straight packet format with a reserved distance");
         verify(RouteTurn.Companion.decode(RouteTurn.Companion.encode(turns)).equals(turns),
             "Turns survive Activity state and service transport");
+
+        double secondCorner = lon + .008;
+        RoutePlayback twoTurns = new RoutePlayback(
+            road("two turns", lon, lat, lon, north, secondCorner, north, secondCorner, north + .001).getPoints(),
+            List.of(new RouteTurn(1, TurnDirection.RIGHT), new RouteTurn(2, TurnDirection.LEFT)));
+        double secondTurnDistance = cornerDistance + map.distanceMeters(north, lon, north, secondCorner);
+        verify(twoTurns.guidanceAt(cornerDistance).bleLine().startsWith("S,") &&
+            twoTurns.guidanceAt(cornerDistance).getMeters() > 500,
+            "Passing a turn restores straight when the next turn is still far away");
+        verify(twoTurns.guidanceAt(secondTurnDistance - 500.1).bleLine().equals("S,501,0"),
+            "A turn just outside the notice distance remains straight");
+        verify(twoTurns.guidanceAt(secondTurnDistance - 500.0).bleLine().equals("L,500,0") &&
+            twoTurns.guidanceAt(secondTurnDistance - 1).bleLine().equals("L,1,0"),
+            "Turn guidance begins at 500 metres and continues through the approach");
 
         List<Pair<Double, Double>> guidanceShape = new ArrayList<>();
         for (int i = 0; i < 1200; i++) guidanceShape.add(new Pair<>(lon + i * .00001, lat));

@@ -5,6 +5,8 @@ import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.roundToInt
 
+private const val TURN_NOTICE_METERS = 500
+
 internal data class PlaybackPoint(val latitude: Double, val longitude: Double, val bearing: Int)
 
 internal enum class TurnDirection(val command: Char, val label: String) {
@@ -28,15 +30,11 @@ internal data class RouteTurn(val shapeIndex: Int, val direction: TurnDirection)
 internal data class PlaybackGuidance(val direction: TurnDirection?, val meters: Int) {
     val label: String get() = when {
         meters == 0 -> "已到达终点"
-        direction == null -> "距终点 $meters 米"
+        direction == null -> "直行 · $meters 米"
         else -> "${meters} 米后${direction.label}"
     }
 
-    fun bleLine() = when {
-        meters == 0 -> "S,0,0"
-        direction == null -> "S,-1,0"
-        else -> "${direction.command},${meters.coerceAtMost(1_000_000)},0"
-    }
+    fun bleLine() = "${direction?.command ?: 'S'},${meters.coerceAtMost(1_000_000)},0"
 }
 
 /** Interpolate by metres along the same polyline that is sent to the round display. */
@@ -73,7 +71,9 @@ internal class RoutePlayback(coordinates: List<Pair<Double, Double>>, turns: Lis
     fun guidanceAt(distanceMeters: Double): PlaybackGuidance {
         val distance = distanceMeters.coerceIn(0.0, totalMeters)
         val next = turnDistances.firstOrNull { (at, _) -> at > distance }
-        return PlaybackGuidance(next?.second, ceil((next?.first ?: totalMeters) - distance).toInt())
+        val remaining = ceil((next?.first ?: totalMeters) - distance).toInt()
+        val direction = next?.second?.takeIf { remaining <= TURN_NOTICE_METERS }
+        return PlaybackGuidance(direction, remaining)
     }
 
     fun pointAt(distanceMeters: Double): PlaybackPoint {
