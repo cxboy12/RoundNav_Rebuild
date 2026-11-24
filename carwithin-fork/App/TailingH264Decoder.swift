@@ -177,7 +177,7 @@ final class TailingH264Decoder {
     }
 }
 
-private struct TailingAVCConfigurationRecord {
+struct TailingAVCConfigurationRecord {
     let nalUnitHeaderLength: Int
     let parameterSets: [Data]
 

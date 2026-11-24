@@ -14,6 +14,7 @@
 		BF8C88925F55D6937482C442 /* App/TailingProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1742C549D25653794782E49 /* App/TailingProtocol.swift */; };
 		88C07C68A7CFD386DB471AF9 /* App/TailingOutput.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15C6BB68729B79CB1589593B /* App/TailingOutput.swift */; };
 		62F412746B13C9EA7025D6A0 /* App/RoundNavOutput.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FA1BC6CBAE719E732DC517C /* App/RoundNavOutput.swift */; };
+		1E7D839D42582EB2E047A8DB /* App/RoundNavRelay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03D969BCB60814EE2D863093 /* App/RoundNavRelay.swift */; };
 		3E993C6802C1E33EC03EFBC5 /* App/ZeehoOutput.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9F89B7E1AD4F9FE63CB7E8F /* App/ZeehoOutput.swift */; };
 		64576F6B578385AC20CCF3BF /* App/NinebotH264Encoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AF3F2E542AC14DF20A41F8A /* App/NinebotH264Encoder.swift */; };
 		73708DB94B38AB7D108A63DC /* App/NinebotUDPSocket.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6983BA5CA7041AE8981B978 /* App/NinebotUDPSocket.swift */; };
@@ -100,6 +101,7 @@
 		E1742C549D25653794782E49 /* App/TailingProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/TailingProtocol.swift; sourceTree = "<group>"; };
 		15C6BB68729B79CB1589593B /* App/TailingOutput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/TailingOutput.swift; sourceTree = "<group>"; };
 		0FA1BC6CBAE719E732DC517C /* App/RoundNavOutput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/RoundNavOutput.swift; sourceTree = "<group>"; };
+		03D969BCB60814EE2D863093 /* App/RoundNavRelay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/RoundNavRelay.swift; sourceTree = "<group>"; };
 		C9F89B7E1AD4F9FE63CB7E8F /* App/ZeehoOutput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/ZeehoOutput.swift; sourceTree = "<group>"; };
 		6AF3F2E542AC14DF20A41F8A /* App/NinebotH264Encoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/NinebotH264Encoder.swift; sourceTree = "<group>"; };
 		D6983BA5CA7041AE8981B978 /* App/NinebotUDPSocket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/NinebotUDPSocket.swift; sourceTree = "<group>"; };
@@ -198,6 +200,7 @@
 				B04FAD42C897506E681468AD /* App/TailingIdentity.swift */,
 				15C6BB68729B79CB1589593B /* App/TailingOutput.swift */,
 				0FA1BC6CBAE719E732DC517C /* App/RoundNavOutput.swift */,
+				03D969BCB60814EE2D863093 /* App/RoundNavRelay.swift */,
 				C9F89B7E1AD4F9FE63CB7E8F /* App/ZeehoOutput.swift */,
 				6AF3F2E542AC14DF20A41F8A /* App/NinebotH264Encoder.swift */,
                 AAAAAAAA0000000000000003 /* ikcp.c */,
@@ -356,6 +359,7 @@
 				20981E104E400F63191A9A75 /* App/TailingIdentity.swift in Sources */,
 				88C07C68A7CFD386DB471AF9 /* App/TailingOutput.swift in Sources */,
 				62F412746B13C9EA7025D6A0 /* App/RoundNavOutput.swift in Sources */,
+				1E7D839D42582EB2E047A8DB /* App/RoundNavRelay.swift in Sources */,
 				3E993C6802C1E33EC03EFBC5 /* App/ZeehoOutput.swift in Sources */,
 				64576F6B578385AC20CCF3BF /* App/NinebotH264Encoder.swift in Sources */,
 				73708DB94B38AB7D108A63DC /* App/NinebotUDPSocket.swift in Sources */,

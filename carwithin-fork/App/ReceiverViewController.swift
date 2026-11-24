@@ -186,6 +186,29 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let roundNavQuality = ChoiceMenu(items: ["40", "50", "60", "70", "80", "90"])
     private let roundNavRotation = ChoiceMenu(items: ["0°", "90°", "180°", "270°"])
     private let roundNavFit = ChoiceMenu(items: ["居中裁切", "等比缩放"])
+    private lazy var relaySource: UITextField = {
+        let field = UITextField()
+        field.text = UserDefaults.standard.string(forKey: "roundNavRelaySource") ?? ""
+        field.keyboardType = .URL
+        field.autocapitalizationType = .none
+        field.autocorrectionType = .no
+        return field
+    }()
+    private lazy var relayDestination: UITextField = {
+        let field = UITextField()
+        field.text = UserDefaults.standard.string(forKey: "roundNavRelayDestination") ?? "192.168.4.1"
+        field.keyboardType = .numbersAndPunctuation
+        return field
+    }()
+    private let relaySize = ChoiceMenu(items: ["464", "448", "360"])
+    private let relayFPS = ChoiceMenu(items: ["10", "15", "20", "25", "30"])
+    private lazy var relayStatus: StatusLabel = {
+        let label = StatusLabel()
+        label.text = "等待启动"
+        return label
+    }()
+    private var relay: RoundNavRelay?
+    private var relayGeneration = UUID()
     private enum HeadUnitOutput: Int {
         case browser, carLife, airPlay, tailing, ninebot, zeeho, ninebotSeven, ninebot43, roundNav
         var ninebotMode: NinebotOutput.Mode? {
@@ -1410,6 +1433,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
     }
     @objc private func toggleReceiver() {
+        guard relay == nil else { alert("转发正在运行", "先在「原版视频转发」停止转发。"); return }
         if running || waitingForNetwork { stop(); return }
         if !restartingAutomatically { networkRestartCount = 0 }
         clearStartupHint()
@@ -2215,6 +2239,9 @@ extension ReceiverViewController {
     fileprivate func rootSettingsPage() -> SettingsPageController {
         page("设置") { [unowned self] in
             var connection: [SettingsRow] = [
+                .page("原版视频转发", icon: ("rectangle.connected.to.line.below", .systemIndigo)) {
+                    [unowned self] in self.roundNavRelayPage()
+                },
                 .page("使用说明", icon: ("book.fill", .systemOrange)) { [unowned self] in self.usagePage() }
             ]
             if needsNetworkDetails {
@@ -2589,6 +2616,74 @@ extension ReceiverViewController {
     }
 
     // MARK: 输出方式
+
+    private func roundNavRelayPage() -> SettingsPageController {
+        page("原版视频转发") { [unowned self] in
+            let active = relay != nil
+            relaySource.isEnabled = !active
+            relayDestination.isEnabled = !active
+            relaySize.isEnabled = !active
+            relayFPS.isEnabled = !active
+            return [SettingsSection(footer: "先在原版启动 H.264 和局域网接收页，再切回这里。原版地址留空时使用本机 Wi-Fi 地址和端口 9888。", [
+                .field("原版 HTTP 地址", relaySource, placeholder: "自动"),
+                .field("圆屏 IP", relayDestination),
+                .control("画面边长（像素）", icon: ("viewfinder", .systemIndigo), relaySize),
+                .control("发送帧率上限", icon: ("speedometer", .systemIndigo), relayFPS),
+                .action(active ? "停止转发" : "开始转发", icon: (active ? "stop.fill" : "play.fill", .systemIndigo)) {
+                    [unowned self] in self.toggleRoundNavRelay()
+                },
+                .note(relayStatus)
+            ])]
+        }
+    }
+
+    private func toggleRoundNavRelay() {
+        relayGeneration = UUID()
+        if let relay {
+            relay.stop()
+            self.relay = nil
+            UIApplication.shared.isIdleTimerDisabled = false
+            relayStatus.text = "已停止"
+            reloadVisibleSettings()
+            return
+        }
+        guard !running else {
+            alert("本机 CarPlay 正在运行", "请先停止此 App 的本机 CarPlay。")
+            return
+        }
+        settingsNavigation?.view.endEditing(true)
+        let sourceText = (relaySource.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let defaultHost = ReceiverConfiguration.wifiIPv4Address() ?? "127.0.0.1"
+        var source = URLComponents(string: sourceText.isEmpty ? "http://\(defaultHost):9888" : sourceText)
+        let destination = (relayDestination.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard source?.scheme?.lowercased() == "http", source?.host != nil,
+              source?.user == nil, source?.password == nil, IPv4Address(destination) != nil else {
+            alert("请检查地址", "原版地址应为 App 显示的 HTTP 地址，圆屏填写 IPv4 地址。")
+            return
+        }
+        source?.scheme = "ws"
+        source?.path = "/stream"
+        source?.query = nil
+        source?.fragment = nil
+        guard let url = source?.url else { return }
+        UserDefaults.standard.set(sourceText, forKey: "roundNavRelaySource")
+        UserDefaults.standard.set(destination, forKey: "roundNavRelayDestination")
+        let generation = relayGeneration
+        let settings = RoundNavOutput.Settings(host: destination, preferredSide: Int(relaySize.selectedTitle) ?? 464,
+            fps: Int(relayFPS.selectedTitle) ?? 10, quality: 70, orientation: .up, fit: false)
+        let relay = RoundNavRelay(source: url, settings: settings) { [weak self] message in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.relayGeneration == generation else { return }
+                self.relayStatus.text = message
+                self.log(message)
+            }
+        }
+        self.relay = relay
+        UIApplication.shared.isIdleTimerDisabled = true
+        relayStatus.text = "正在连接原版 CarWithin"
+        relay.start()
+        reloadVisibleSettings()
+    }
 
     fileprivate func headUnitPage() -> SettingsPageController {
         page("输出设置") { [unowned self] in
