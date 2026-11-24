@@ -202,6 +202,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     }()
     private let relaySize = ChoiceMenu(items: ["464", "448", "360"])
     private let relayFPS = ChoiceMenu(items: ["10", "15", "20", "25", "30"])
+    private let relayKeepAliveSwitch = UISwitch()
     private lazy var relayStatus: StatusLabel = {
         let label = StatusLabel()
         label.text = "等待启动"
@@ -885,10 +886,13 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         videoHeight.priority = .defaultLow
         videoHeight.isActive = true
     }
-    @objc private func keepAliveChanged() {
-        UserDefaults.standard.set(keepAliveSwitch.isOn, forKey: "backgroundKeepAlive")
-        if !keepAliveSwitch.isOn { keepAlive.stop() }
-        else if running, UIApplication.shared.applicationState == .active { keepAlive.start() }
+    @objc private func keepAliveChanged(_ sender: UISwitch) {
+        let enabled = sender.isOn
+        keepAliveSwitch.isOn = enabled
+        relayKeepAliveSwitch.isOn = enabled
+        UserDefaults.standard.set(enabled, forKey: "backgroundKeepAlive")
+        if !enabled { keepAlive.stop() }
+        else if running || relay != nil, UIApplication.shared.applicationState == .active { keepAlive.start() }
     }
     @objc private func appearanceChanged() {
         UserDefaults.standard.set(appearanceControl.selectedSegmentIndex, forKey: "carPlayAppearance")
@@ -1747,10 +1751,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         carLifeAddressField.isEnabled = value
     }
     @objc private func willResignActive() {
-        guard running else { return }
+        guard running || relay != nil else { return }
         // Normally already running; retry if foreground activation failed.
         if keepAliveSwitch.isOn { keepAlive.start() }
-        pictureInPicture.awaitAutomaticStart()
+        if running { pictureInPicture.awaitAutomaticStart() }
     }
     @objc private func becameActive() {
         refreshNetworkAddresses()
@@ -1760,7 +1764,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         pictureInPicture.returnedToForeground()
         resumeLocalVideo()
         pictureInPicture.sourceMayBeReady()
-        if running, keepAliveSwitch.isOn { keepAlive.start() }
+        if running || relay != nil, keepAliveSwitch.isOn { keepAlive.start() }
         if let reason = pendingRestartReason {
             pendingRestartReason = nil
             restartCarPlay(reason: reason, forPerformance: true)
@@ -1888,10 +1892,14 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     @objc private func backgrounded() {
         updateCheckTask?.cancel()
         receiverBrowser.stop()
-        guard running else { return }
+        guard running || relay != nil else { return }
         // willResignActive may have failed to start it (e.g. the session was busy); try once more
         // before deciding the session cannot survive in the background.
         if keepAliveSwitch.isOn, !keepAlive.isRunning, keepAlive.start() { log("后台保持在进入后台时重试成功") }
+        if relay != nil {
+            log(keepAlive.isRunning ? "RoundNav 转发已进入后台，后台保持运行中" : "RoundNav 转发进入后台，iOS 可能暂停转发")
+            return
+        }
         if canRunInBackground {
             log(keepAlive.isRunning ? "App 已进入后台，CarPlay 继续运行" : "App 已进入后台，由画中画保持运行")
         } else {
@@ -1965,7 +1973,10 @@ extension ReceiverViewController {
         pictureInPictureTiming.selectedSegmentIndex = defaults.object(forKey: "pictureInPictureTiming") as? Int ?? (legacyPiPEnabled ? 1 : 0)
         pictureInPictureTiming.addTarget(self, action: #selector(pictureInPictureTimingChanged), for: .valueChanged)
         keepAliveSwitch.isOn = defaults.object(forKey: "backgroundKeepAlive") as? Bool ?? true
-        keepAliveSwitch.addTarget(self, action: #selector(keepAliveChanged), for: .valueChanged)
+        relayKeepAliveSwitch.isOn = keepAliveSwitch.isOn
+        [keepAliveSwitch, relayKeepAliveSwitch].forEach {
+            $0.addTarget(self, action: #selector(keepAliveChanged(_:)), for: .valueChanged)
+        }
         let savedOutput = defaults.object(forKey: "headUnitOutputV2") as? Int
         let previousOutput = defaults.object(forKey: "headUnitOutput") as? Int
         let legacyOutput: HeadUnitOutput = defaults.bool(forKey: "carLifeEnabled") ? .carLife : .browser
@@ -2636,6 +2647,7 @@ extension ReceiverViewController {
                 .field("圆屏 IP", relayDestination),
                 .control("画面边长（像素）", icon: ("viewfinder", .systemIndigo), relaySize),
                 .control("发送帧率上限", icon: ("speedometer", .systemIndigo), relayFPS),
+                .control("切换 App 后继续转发", icon: ("lock.fill", .systemPurple), relayKeepAliveSwitch),
                 .action(active ? "停止转发" : "开始转发", icon: (active ? "stop.fill" : "play.fill", .systemIndigo)) {
                     [unowned self] in self.toggleRoundNavRelay()
                 },
@@ -2649,6 +2661,7 @@ extension ReceiverViewController {
         if let relay {
             relay.stop()
             self.relay = nil
+            keepAlive.stop()
             UIApplication.shared.isIdleTimerDisabled = false
             relayStatus.text = "已停止"
             modeChanged()
@@ -2689,6 +2702,7 @@ extension ReceiverViewController {
         self.relay = relay
         UIApplication.shared.isIdleTimerDisabled = true
         relayStatus.text = "正在连接原版 CarWithin"
+        if keepAliveSwitch.isOn { keepAlive.start() }
         relay.start()
         modeChanged()
         reloadVisibleSettings()
