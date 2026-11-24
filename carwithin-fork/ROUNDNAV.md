@@ -4,9 +4,10 @@
 
 ## 用手机上已能启动 CarPlay 的原版转发
 
-1. iPhone 加入微雪的 `RoundNav-XXXX` 热点。在原版 CarWithin 选择「浏览器」，开启局域网接收页，画面固定为 H.264，启动 CarPlay 并让原版进入画中画。
+1. iPhone 加入微雪板当前的热点。原 DiPlay 固件使用 `DiPlay-Round`，直连固件使用 `RoundNav-XXXX`。在原版 CarWithin 选择「浏览器」，开启局域网接收页，画面固定为 H.264，启动 CarPlay 并让原版进入画中画。
 2. 在「CarWithin RoundNav」首页打开「原版视频转发」，也可从设置进入。若原版使用 HTTP 端口 9888，原版地址可以留空。否则填原版显示的完整 HTTP 地址。圆屏地址默认 `192.168.4.1`。
 3. 保持默认 464×464、10 FPS，开启「切换 App 后继续转发」再点「开始转发」。确认圆屏出画后再切到另一个 App，原版 CarWithin 继续保持后台运行。RoundNav 转发复用音频后台保持，切回后会尝试恢复连接。原版通过局域网提供 H.264，并负责 CarPlay 认证。
+4. 测试息屏前，在原版设置开启「锁屏与后台继续运行」，并在 iPhone「设置 → 通用 → CarPlay」为原版对应的 CarPlay 记录开启「锁定时允许 CarPlay」。
 
 ## 在 RoundNav 内启动本机 CarPlay
 
