@@ -1414,12 +1414,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 identity = try AccessoryIdentityStore.loadFromBundle()
                 log("已从内置资源载入 MFi 身份，ECDSA 自检通过")
             }
-            startButton.isEnabled = true
-            statusLabel.text = "可以开始连接"
         } catch {
             identity = nil
-            statusLabel.text = "尚未导入有效的 MFi 身份"; startButton.isEnabled = false
-            log("请通过 Documents/IdentityImport 导入 certificate.p7b、leaf.cer 和 private.x963。错误：\(error.localizedDescription)")
+            log("本机 CarPlay 未载入 MFi 身份。原版视频转发可用。")
             if importing { saveIdentityImportResult("failure: \(error.localizedDescription)") }
         }
     }
@@ -1433,8 +1430,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
     }
     @objc private func toggleReceiver() {
-        guard relay == nil else { alert("转发正在运行", "先在「原版视频转发」停止转发。"); return }
         if running || waitingForNetwork { stop(); return }
+        if identity == nil || relay != nil {
+            revealSettings(relayPage: true)
+            return
+        }
         if !restartingAutomatically { networkRestartCount = 0 }
         clearStartupHint()
         updateCheckTask?.cancel()
@@ -1658,7 +1658,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         modeControl.isEnabled = true
         UIApplication.shared.isIdleTimerDisabled = false; setEditing(true)
         modeChanged()
-        statusLabel.text = identity == nil ? "需要导入 MFi 身份" : "已停止"
+        if identity != nil { statusLabel.text = "已停止" }
         log("CarPlay 接收已停止")
     }
 
@@ -1694,7 +1694,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             receiverPicker.setTitle("正在搜索 iPad 接收端…", for: .normal)
             receiverBrowser.start()
         }
-        let title = remote ? "连接到 iPad" : local ? "本机 CarPlay" : "CarPlay 接收屏"
+        let showsRelay = identity == nil || relay != nil
+        let title = showsRelay ? "RoundNav 圆屏转发"
+            : remote ? "连接到 iPad" : local ? "本机 CarPlay" : "CarPlay 接收屏"
         let headingText = NSMutableAttributedString(string: title)
         if local, let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String {
             headingText.append(NSAttributedString(string: "（\(version)）", attributes: [
@@ -1703,18 +1705,22 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             ]))
         }
         heading.attributedText = headingText
-        explanation.text = remote ? "选择一台 iPad，把这台 iPhone 的 CarPlay 投送到它的屏幕。"
+        explanation.text = showsRelay ? "把原版 CarWithin 的 CarPlay 画面发给 RoundNav 圆屏。"
+            : remote ? "选择一台 iPad，把这台 iPhone 的 CarPlay 投送到它的屏幕。"
             : local ? "无需外接盒子，直接在这台 iPhone 上启动并显示 CarPlay。" : "接收另一台 iPhone 的导航、音乐和触控画面。"
-        connectionHelp.text = remote
+        connectionHelp.text = showsRelay ? "先连上圆屏热点，在原版启动 CarPlay 并保留画中画。"
+            : remote
             ? "让 iPhone 和 iPad 连接同一个 Wi-Fi。"
             : local ? "先在系统设置连接 Wi-Fi，再在 CarWithin 选择对应预设。"
             : "先启动此接收屏，再从另一台 iPhone 发起连接。"
         refreshNetworkSummary()
         refreshVideoOutputSummary()
-        startButton.isEnabled = identity != nil
+        startButton.isEnabled = true
         startButton.configuration?.image = UIImage(systemName: "play.fill")
-        startButton.setTitle(remote ? "连接到 iPad" : local ? "启动本机 CarPlay" : "启动 CarPlay 接收屏", for: .normal)
-        statusLabel.text = identity == nil ? "需要导入 MFi 身份" : remote ? "请选择接收端" : "准备就绪"
+        startButton.setTitle(showsRelay ? "原版视频转发"
+            : remote ? "连接到 iPad" : local ? "启动本机 CarPlay" : "启动 CarPlay 接收屏", for: .normal)
+        statusLabel.text = showsRelay ? (relay == nil ? "等待开始转发" : "转发已启动")
+            : remote ? "请选择接收端" : "准备就绪"
         refreshCurrentNetwork(requestPermission: false)
     }
     private func setEditing(_ value: Bool) {
@@ -2057,7 +2063,7 @@ extension ReceiverViewController {
     }
 
     /// Shows settings and, when needed, takes the user to the relevant connection settings.
-    func revealSettings(wifi: Bool = false, output: Bool = false) {
+    func revealSettings(wifi: Bool = false, output: Bool = false, relayPage: Bool = false) {
         view.endEditing(true)
         if let navigation = settingsNavigation {
             if wifi, activeWiFiForm == nil {
@@ -2076,6 +2082,7 @@ extension ReceiverViewController {
         navigation.presentationController?.delegate = self
         if wifi { navigation.pushViewController(wifiPage(), animated: false) }
         if output { navigation.pushViewController(headUnitPage(), animated: false) }
+        if relayPage { navigation.pushViewController(roundNavRelayPage(), animated: false) }
         settingsNavigation = navigation
         present(navigation, animated: true)
     }
@@ -2644,6 +2651,7 @@ extension ReceiverViewController {
             self.relay = nil
             UIApplication.shared.isIdleTimerDisabled = false
             relayStatus.text = "已停止"
+            modeChanged()
             reloadVisibleSettings()
             return
         }
@@ -2682,6 +2690,7 @@ extension ReceiverViewController {
         UIApplication.shared.isIdleTimerDisabled = true
         relayStatus.text = "正在连接原版 CarWithin"
         relay.start()
+        modeChanged()
         reloadVisibleSettings()
     }
 
