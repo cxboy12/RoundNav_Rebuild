@@ -10,8 +10,10 @@
 #include "nav_ui.h"
 #include "road_store.h"
 
-#define MAP_DIAMETER_PX 380
-#define MAP_RADIUS_PX 190.0f
+/* 21 px between the 466 px panel edge and the map circle. The visible radius
+ * stays 150 m, so the map is drawn about 12% larger (1.41 px per metre). */
+#define MAP_DIAMETER_PX 424
+#define MAP_RADIUS_PX 212.0f
 #define MAP_RADIUS_M 150.0f
 #define ROUTE_MAX_POINTS 500
 #define MARKER_ROWS 11
@@ -889,6 +891,12 @@ void nav_ui_init(void)
     lv_label_set_text(s_ble_label, "BLE WAIT");
     lv_obj_set_style_text_color(s_ble_label, lv_color_hex(0x788797), 0);
     lv_obj_set_style_text_font(s_ble_label, LV_FONT_DEFAULT, 0);
+    /* The larger map reaches under the status text; a dark pill keeps it legible. */
+    lv_obj_set_style_bg_color(s_ble_label, lv_color_hex(SCREEN_BG_RGB), 0);
+    lv_obj_set_style_bg_opa(s_ble_label, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_ble_label, 10, 0);
+    lv_obj_set_style_pad_hor(s_ble_label, 8, 0);
+    lv_obj_set_style_pad_ver(s_ble_label, 2, 0);
     lv_obj_align(s_ble_label, LV_ALIGN_BOTTOM_MID, 0, -12);
 
     s_route_count = 0;
