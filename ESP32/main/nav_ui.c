@@ -23,6 +23,13 @@
 #define ROAD_MARGIN_PX 128
 #define ROAD_BITMAP_PX (MAP_DIAMETER_PX + 2 * ROAD_MARGIN_PX)
 #define CACHE_SLICE_US 7000
+/* Redraw the cache at the current heading once the heading has stayed within
+ * 2 degrees for 0.7 s and differs from the cache by 3 degrees or more. Within
+ * 0.3 degrees the cache is shown as drawn, without nearest-pixel rotation. */
+#define HEADING_STEADY_TENTHS 20
+#define HEADING_STEADY_MS 700
+#define HEADING_REBUILD_TENTHS 30
+#define HEADING_SNAP_TENTHS 3
 #define CACHE_ROWS_PER_BATCH 64
 #define CACHE_SEGMENTS_PER_BATCH 24
 #define SAMPLE_SHIFT 16
@@ -48,6 +55,10 @@ typedef struct {
     lv_obj_t *canvas;
     uint16_t *pixels;
     map_origin_t origin;
+    /* Heading the bitmap was drawn at. When the display heading matches it,
+     * rows are copied unrotated and keep LVGL's anti-aliased edges. */
+    int heading_tenths;
+    float cs, sn;
 } map_cache_t;
 
 static map_cache_t s_map_cache[2];
@@ -61,6 +72,8 @@ static int s_cache_front;
 static bool s_cache_valid, s_cache_dirty;
 static int s_build_row, s_build_road = -1, s_build_point, s_build_pass;
 static int s_view_dx, s_view_dy, s_view_heading = -1;
+static int s_heading_anchor_tenths;
+static uint32_t s_heading_anchor_tick;
 static int32_t s_view_progress_dm = -1;
 static lv_obj_t *s_ble_label;
 static lv_obj_t *s_nav_label;
@@ -236,7 +249,7 @@ static void fill_building(const map_cache_t *back, const road_t *road)
     int top = ROAD_BITMAP_PX;
     int bottom = -1;
     for (int i = 0; i < count; ++i) {
-        project_point(&road->points[i], &back->origin, 1, 0, ROAD_BITMAP_PX / 2, &outline[i]);
+        project_point(&road->points[i], &back->origin, back->cs, back->sn, ROAD_BITMAP_PX / 2, &outline[i]);
         top = LV_MIN(top, (int)outline[i].y);
         bottom = LV_MAX(bottom, (int)outline[i].y);
     }
@@ -270,6 +283,9 @@ static void fill_building(const map_cache_t *back, const road_t *road)
 static void start_cache_build(map_cache_t *back)
 {
     back->origin = camera_origin();
+    back->heading_tenths = s_heading_tenths;
+    back->cs = s_heading_cos;
+    back->sn = s_heading_sin;
     memcpy(s_build_roads, s_road_store->roads, sizeof(s_road_store->roads));
     for (int x = 0; x < ROAD_BITMAP_PX; ++x) back->pixels[x] = s_map_background;
     s_build_row = 1;
@@ -330,9 +346,9 @@ static void draw_cache_batch(const map_cache_t *back)
             line.width = 1;
         }
         line.round_start = line.round_end = true;
-        project_point(&points[s_build_point - 1], &back->origin, 1, 0, ROAD_BITMAP_PX / 2, &line.p1);
+        project_point(&points[s_build_point - 1], &back->origin, back->cs, back->sn, ROAD_BITMAP_PX / 2, &line.p1);
         while (budget > 0 && s_build_point < count) {
-            project_point(&points[s_build_point++], &back->origin, 1, 0, ROAD_BITMAP_PX / 2, &line.p2);
+            project_point(&points[s_build_point++], &back->origin, back->cs, back->sn, ROAD_BITMAP_PX / 2, &line.p2);
             lv_draw_line(&layer, &line);
             line.p1 = line.p2;
             --budget;
@@ -377,14 +393,22 @@ static void draw_route_segment(int x, int y, int end_x, int end_y, uint16_t colo
     }
 }
 
-static void draw_route_overlay(void)
+static int heading_delta_tenths(int a, int b)
+{
+    return ((a - b) % 3600 + 5400) % 3600 - 1800;
+}
+
+/* Route uses the same heading as the base map, so both stay aligned. */
+static void draw_route_overlay(int view_tenths)
 {
     if (s_route_count < 2) return;
     const map_origin_t origin = camera_origin();
+    const float angle = view_tenths * (float)(DEG_TO_RAD / 10.0);
+    const float route_cs = cosf(angle), route_sn = sinf(angle);
     lv_point_precise_t a, b;
-    project_point(&s_route[0], &origin, s_heading_cos, s_heading_sin, MAP_RADIUS_PX, &a);
+    project_point(&s_route[0], &origin, route_cs, route_sn, MAP_RADIUS_PX, &a);
     for (int i = 1; i < s_route_count; ++i, a = b) {
-        project_point(&s_route[i], &origin, s_heading_cos, s_heading_sin, MAP_RADIUS_PX, &b);
+        project_point(&s_route[i], &origin, route_cs, route_sn, MAP_RADIUS_PX, &b);
         const float start = s_route_meters[i - 1], end = s_route_meters[i];
         const uint16_t neutral = lv_color_to_u16(lv_color_hex(ROUTE_RGB));
         const uint16_t traffic = lv_color_to_u16(route_color(s_route_traffic[i - 1]));
@@ -404,19 +428,24 @@ static void draw_route_overlay(void)
 
 static void compose_map_view(const map_cache_t *front, int dx, int dy)
 {
+    /* The cache was drawn at front->heading_tenths; rotate only by the rest. */
+    int delta = heading_delta_tenths(s_heading_tenths, front->heading_tenths);
+    if (abs(delta) <= HEADING_SNAP_TENTHS) delta = 0;
+    const int view_tenths = delta == 0 ? front->heading_tenths : s_heading_tenths;
     const int32_t progress_dm = (int32_t)lround(s_route_progress * 10);
-    if (dx == s_view_dx && dy == s_view_dy && s_heading_tenths == s_view_heading &&
+    if (dx == s_view_dx && dy == s_view_dy && view_tenths == s_view_heading &&
         progress_dm == s_view_progress_dm) return;
     s_view_dx = dx;
     s_view_dy = dy;
-    s_view_heading = s_heading_tenths;
+    s_view_heading = view_tenths;
     s_view_progress_dm = progress_dm;
+    const float delta_angle = delta * (float)(DEG_TO_RAD / 10.0);
 
     const int radius = MAP_DIAMETER_PX / 2;
     const int cx = ROAD_BITMAP_PX / 2 - dx;
     const int cy = ROAD_BITMAP_PX / 2 - dy;
-    const int cs = (int)lroundf(s_heading_cos * SAMPLE_ONE);
-    const int sn = (int)lroundf(s_heading_sin * SAMPLE_ONE);
+    const int cs = (int)lroundf(cosf(delta_angle) * SAMPLE_ONE);
+    const int sn = (int)lroundf(sinf(delta_angle) * SAMPLE_ONE);
     const bool covered = abs(dx) <= ROAD_MARGIN_PX && abs(dy) <= ROAD_MARGIN_PX;
     const bool intersects = abs(dx) < ROAD_BITMAP_PX / 2 + radius && abs(dy) < ROAD_BITMAP_PX / 2 + radius;
     /* Inverse sample only the circular viewport in native RGB565. The
@@ -427,7 +456,7 @@ static void compose_map_view(const map_cache_t *front, int dx, int dy)
         uint16_t *dest = s_view_pixels + row * s_view_stride + inset;
         const int x = inset - radius;
         const int y = row - radius;
-        if (covered && s_heading_tenths == 0) {
+        if (covered && delta == 0) {
             memcpy(dest, front->pixels + (cy + y) * s_cache_stride + cx + x, count * sizeof(*dest));
             continue;
         }
@@ -447,19 +476,48 @@ static void compose_map_view(const map_cache_t *front, int dx, int dy)
             sy += sn;
         }
     }
-    draw_route_overlay();
+    draw_route_overlay(view_tenths);
     lv_obj_invalidate(s_map_view);
+}
+
+/* Current centre relative to the cache centre, in cache pixels (rotated like
+ * project_point), negated as the callers expect. */
+static void cache_offset(const map_cache_t *cache, int *dx, int *dy)
+{
+    const double east = (s_center_lon_e6 - cache->origin.lon) * cache->origin.east_scale;
+    const double south = (cache->origin.lat - s_center_lat_e6) * NORTH_PIXELS_PER_E6;
+    *dx = -(int)lround(east * cache->cs + south * cache->sn);
+    *dy = -(int)lround(-east * cache->sn + south * cache->cs);
+}
+
+static bool heading_rebuild_pending(void)
+{
+    return s_cache_valid && abs(heading_delta_tenths(s_heading_tenths,
+        s_map_cache[s_cache_front].heading_tenths)) >= HEADING_REBUILD_TENTHS;
+}
+
+/* Turns keep rotating the existing cache; a steady heading earns a redraw. */
+static bool heading_rebuild_due(void)
+{
+    const uint32_t now = lv_tick_get();
+    if (abs(heading_delta_tenths(s_heading_tenths, s_heading_anchor_tenths)) > HEADING_STEADY_TENTHS) {
+        s_heading_anchor_tenths = s_heading_tenths;
+        s_heading_anchor_tick = now;
+        return false;
+    }
+    return now - s_heading_anchor_tick >= HEADING_STEADY_MS && heading_rebuild_pending();
 }
 
 static void refresh_cached_map(void)
 {
     if (!s_map_view || !s_center_valid || !s_road_store) return;
     map_cache_t *front = &s_map_cache[s_cache_front];
-    int dx = (int)lround((front->origin.lon - s_center_lon_e6) * front->origin.east_scale);
-    int dy = (int)lround((s_center_lat_e6 - front->origin.lat) * NORTH_PIXELS_PER_E6);
+    int dx, dy;
+    cache_offset(front, &dx, &dy);
     const int64_t started = esp_timer_get_time();
     map_cache_t *back = &s_map_cache[1 - s_cache_front];
-    if (s_cache_dirty || (s_build_road < 0 && (!s_cache_valid || abs(dx) > ROAD_MARGIN_PX || abs(dy) > ROAD_MARGIN_PX))) {
+    if (s_cache_dirty || (s_build_road < 0 && (!s_cache_valid || abs(dx) > ROAD_MARGIN_PX ||
+                                               abs(dy) > ROAD_MARGIN_PX || heading_rebuild_due()))) {
         start_cache_build(back);
     }
     if (s_build_road >= 0) {
@@ -474,8 +532,7 @@ static void refresh_cached_map(void)
             s_cache_valid = true;
             s_view_heading = -1;
             front = back;
-            dx = (int)lround((front->origin.lon - s_center_lon_e6) * front->origin.east_scale);
-            dy = (int)lround((s_center_lat_e6 - front->origin.lat) * NORTH_PIXELS_PER_E6);
+            cache_offset(front, &dx, &dy);
         }
         const int64_t rebuild_us = esp_timer_get_time() - started;
         if (rebuild_us > s_display_perf.rebuild_max_us) s_display_perf.rebuild_max_us = rebuild_us;
@@ -641,7 +698,8 @@ static void display_event(lv_event_t *event)
     case LV_EVENT_REFR_READY:
         /* LVGL pauses its refresh timer at entry. Continue polling motion
          * even when subpixel progress has not invalidated any pixels yet. */
-        if (s_camera_animating || s_build_road >= 0 || (s_cache_dirty && s_center_valid)) {
+        if (s_camera_animating || s_build_road >= 0 || (s_cache_dirty && s_center_valid) ||
+            (s_map_view && heading_rebuild_pending())) {
             lv_timer_t *refresh = lv_display_get_refr_timer(lv_display_get_default());
             if (refresh) lv_timer_resume(refresh);
         }
@@ -790,6 +848,8 @@ static bool init_cached_map(void)
     if (!s_build_roads) return false;
     for (int i = 0; i < 2; ++i) {
         map_cache_t *cache = &s_map_cache[i];
+        cache->cs = 1.0f;
+        cache->sn = 0.0f;
         cache->canvas = create_rgb565_canvas(ROAD_BITMAP_PX, s_cache_stride, &cache->pixels);
         if (cache->canvas) lv_obj_set_hidden(cache->canvas, true);
     }
