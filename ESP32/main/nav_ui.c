@@ -57,7 +57,7 @@ static uint16_t s_map_background;
 static road_t *s_build_roads;
 static int s_cache_front;
 static bool s_cache_valid, s_cache_dirty;
-static int s_build_row, s_build_road = -1, s_build_point;
+static int s_build_row, s_build_road = -1, s_build_point, s_build_pass;
 static int s_view_dx, s_view_dy, s_view_heading = -1;
 static int32_t s_view_progress_dm = -1;
 static lv_obj_t *s_ble_label;
@@ -154,30 +154,67 @@ static void project_point(const geo_point_t *p, const map_origin_t *origin, floa
     out->y = (lv_coord_t)lroundf(center_px - x * sn + y * cs);
 }
 
+/* Roads are drawn like paved streets in three passes over the snapshot:
+ * dark casings (with buildings), then light road surfaces, then a thin centre
+ * line on major roads. Drawing every casing before any surface lets crossing
+ * streets merge into one open junction instead of being cut by kerbs. */
+#define ROAD_PASS_CASING 0
+#define ROAD_PASS_CORE 1
+#define ROAD_PASS_CENTRE 2
+#define ROAD_PASS_COUNT 3
+
+/* Kerb colour; also the solid colour of the low-memory vector fallback. */
 static lv_color_t road_color(int road_class)
 {
+    if (road_class == ROAD_CLASS_BUILDING) return lv_color_hex(BUILDING_RGB);
+    if (road_class == ROAD_CLASS_SERVICE) return lv_color_hex(0x6B7886); /* service, alleys */
+    return lv_color_hex(0x2A3644);
+}
+
+/* Outer width including both kerbs; about 1.27 px per metre at 150 m radius. */
+static int road_width(int road_class)
+{
+    if (road_class == ROAD_CLASS_BUILDING) return 1;
+    if (road_class == ROAD_CLASS_SERVICE) return 6;
+    if (road_class <= 0) return 18;
+    if (road_class == 1) return 17;
+    if (road_class == 2) return 16;
+    if (road_class == 3) return 14;
+    return 11;
+}
+
+static lv_color_t road_core_color(int road_class)
+{
     switch (road_class) {
-    /* Dark, high-contrast streets on the light map, as on dash navigators. */
-    case 0: return lv_color_hex(0x0E1621); /* motorway */
-    case 1: return lv_color_hex(0x142030); /* trunk */
-    case 2: return lv_color_hex(0x1A2736); /* primary */
-    case 3: return lv_color_hex(0x212E3D); /* secondary / tertiary */
-    case ROAD_CLASS_BUILDING: return lv_color_hex(BUILDING_RGB);
-    case ROAD_CLASS_SERVICE: return lv_color_hex(0x4A5868); /* service, alleys */
-    default: return lv_color_hex(0x2B3847); /* local streets */
+    case 0:
+    case 1: return lv_color_hex(0xFFD36B); /* motorway, trunk */
+    case 2: return lv_color_hex(0xFFE79A); /* primary */
+    case 3: return lv_color_hex(0xFFF6D5); /* secondary / tertiary */
+    default: return lv_color_hex(0xFFFFFF); /* local streets, alleys */
     }
 }
 
-static int road_width(int road_class)
+static int road_core_width(int road_class)
 {
-    /* About 1.27 px per metre at the 150 m display radius. */
-    if (road_class == ROAD_CLASS_BUILDING) return 1;
-    if (road_class == ROAD_CLASS_SERVICE) return 4;
-    if (road_class <= 0) return 14;
-    if (road_class == 1) return 13;
-    if (road_class == 2) return 12;
-    if (road_class == 3) return 10;
+    if (road_class == ROAD_CLASS_SERVICE) return 3;
+    if (road_class <= 0) return 13;
+    if (road_class == 1) return 12;
+    if (road_class == 2) return 11;
+    if (road_class == 3) return 9;
     return 7;
+}
+
+/* Thin solid centre line separating the two directions on major roads. */
+static bool road_has_centre(int road_class)
+{
+    return road_class >= 0 && road_class <= 3;
+}
+
+static lv_color_t road_centre_color(int road_class)
+{
+    if (road_class <= 1) return lv_color_hex(0xC08A2E);
+    if (road_class == 2) return lv_color_hex(0xC89B3C);
+    return lv_color_hex(0xB8A680);
 }
 
 static lv_color_t route_color(uint8_t traffic)
@@ -234,6 +271,7 @@ static void start_cache_build(map_cache_t *back)
     memcpy(s_build_roads, s_road_store->roads, sizeof(s_road_store->roads));
     for (int x = 0; x < ROAD_BITMAP_PX; ++x) back->pixels[x] = s_map_background;
     s_build_row = 1;
+    s_build_pass = ROAD_PASS_CASING;
     s_build_road = 0;
     s_build_point = 1;
     s_cache_dirty = false;
@@ -255,23 +293,40 @@ static void draw_cache_batch(const map_cache_t *back)
     while (budget > 0 && s_build_road < ROAD_MAX_COUNT) {
         const road_t *road = &s_build_roads[s_build_road];
         const geo_point_t *points = road->points;
-        const int count = road->active ? road->count : 0;
+        const bool building = road->road_class == ROAD_CLASS_BUILDING;
+        bool drawn = road->active;
+        if (s_build_pass == ROAD_PASS_CORE && building) drawn = false;
+        if (s_build_pass == ROAD_PASS_CENTRE && (building || !road_has_centre(road->road_class))) drawn = false;
+        const int count = drawn ? road->count : 0;
         if (s_build_point >= count) {
             ++s_build_road;
             s_build_point = 1;
+            /* The bitmap is complete only when the last pass reaches the end. */
+            if (s_build_road == ROAD_MAX_COUNT && s_build_pass + 1 < ROAD_PASS_COUNT) {
+                ++s_build_pass;
+                s_build_road = 0;
+            }
             continue;
         }
-        if (road->road_class == ROAD_CLASS_BUILDING) {
+        if (building) {
             fill_building(back, road);
-            ++s_build_road;
-            s_build_point = 1;
+            /* Advance through the shared path above so the pass can roll over. */
+            s_build_point = count;
             budget -= count;
             continue;
         }
         lv_draw_line_dsc_t line;
         lv_draw_line_dsc_init(&line);
-        line.color = road_color(road->road_class);
-        line.width = road_width(road->road_class);
+        if (s_build_pass == ROAD_PASS_CASING) {
+            line.color = road_color(road->road_class);
+            line.width = road_width(road->road_class);
+        } else if (s_build_pass == ROAD_PASS_CORE) {
+            line.color = road_core_color(road->road_class);
+            line.width = road_core_width(road->road_class);
+        } else {
+            line.color = road_centre_color(road->road_class);
+            line.width = 1;
+        }
         line.round_start = line.round_end = true;
         project_point(&points[s_build_point - 1], &back->origin, 1, 0, ROAD_BITMAP_PX / 2, &line.p1);
         while (budget > 0 && s_build_point < count) {
