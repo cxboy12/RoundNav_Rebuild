@@ -4,12 +4,22 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import kotlin.math.roundToInt
 
-internal data class RouteResult(
+internal data class RouteResult @JvmOverloads constructor(
     val coordinates: List<Pair<Double, Double>>, // longitude, latitude
     val distanceKm: Double?,
     val durationSeconds: Double?,
-    val turns: List<RouteTurn> = emptyList()
+    val turns: List<RouteTurn> = emptyList(),
+    val traffic: List<RouteTraffic> = emptyList()
 )
+
+internal enum class RouteTraffic(val rgb: String, val label: String) {
+    UNKNOWN("#4783DD", "无数据"), CLEAR("#16A477", "畅通"),
+    SLOW("#DF8414", "缓行"), BUSY("#D84454", "拥堵");
+
+    companion object {
+        fun decode(codes: IntArray?) = codes?.map { entries.getOrElse(it) { UNKNOWN } }.orEmpty()
+    }
+}
 
 /** The configured server proxies Vietmap Route v4 and owns the Services key. */
 internal object RouteApi {
@@ -70,8 +80,26 @@ internal object RouteApi {
                 add(RouteTurn(start, direction))
             }
         }
+        val congestion = path.optJSONObject("annotations")?.optJSONArray("congestion")
+        val traffic = if (congestion == null) emptyList() else {
+            val edges = MutableList(coordinates.lastIndex) { RouteTraffic.UNKNOWN }
+            for (index in 0 until congestion.length()) {
+                val range = congestion.optJSONObject(index) ?: continue
+                val first = range.optInt("first", -1)
+                val last = range.optInt("last", -1)
+                if (first < 0 || last <= first || last > edges.size) continue
+                val level = when (range.optString("value")) {
+                    "low" -> RouteTraffic.CLEAR
+                    "moderate" -> RouteTraffic.SLOW
+                    "heavy", "severe" -> RouteTraffic.BUSY
+                    else -> RouteTraffic.UNKNOWN
+                }
+                for (edge in first until last) edges[edge] = level
+            }
+            edges
+        }
         return RouteResult(coordinates, path.nonNegative("distance")?.div(1000),
-            path.nonNegative("time")?.div(1000), turns)
+            path.nonNegative("time")?.div(1000), turns, traffic)
     }
 
     private fun JSONObject.nonNegative(key: String) = optDouble(key).takeIf { it.isFinite() && it >= 0 }
@@ -110,7 +138,9 @@ internal object RouteApi {
         val endpoints = setOf(0, points.lastIndex)
         val turnIndices = route.turns.map { it.shapeIndex }.toSet()
         val keepTurns = (endpoints + turnIndices).size <= limit
-        val required = if (keepTurns) endpoints + turnIndices else endpoints
+        val required = (if (keepTurns) endpoints + turnIndices else endpoints).toMutableSet()
+        val boundaries = (1 until route.traffic.size).filter { route.traffic[it - 1] != route.traffic[it] }
+        if ((required + boundaries).size <= limit) required.addAll(boundaries)
         val candidates = points.indices.filterNot { it in required }
         val available = limit - required.size
         val selected = required.toMutableSet()
@@ -122,17 +152,24 @@ internal object RouteApi {
         return route.copy(
             coordinates = ordered.map { points[it] },
             turns = if (keepTurns) route.turns.map { it.copy(shapeIndex = ordered.binarySearch(it.shapeIndex)) }
-                else emptyList()
+                else emptyList(),
+            traffic = if (route.traffic.isEmpty()) emptyList() else ordered.zipWithNext { start, end ->
+                val first = route.traffic.getOrElse(start) { RouteTraffic.UNKNOWN }
+                if ((start until end).all { route.traffic.getOrNull(it) == first }) first else RouteTraffic.UNKNOWN
+            }
         )
     }
 
     fun toBleCommands(route: RouteResult): ArrayList<String> {
-        val selected = displayRoute(route).coordinates
+        val drawable = displayRoute(route)
+        val selected = drawable.coordinates
         val commands = arrayListOf("B,${selected.size}")
         selected.forEachIndexed { index, p ->
             val lon = p.first
             val lat = p.second
-            commands.add("P,$index,${(lat * 1e6).roundToInt()},${(lon * 1e6).roundToInt()}")
+            val traffic = drawable.traffic.getOrNull(index)?.takeUnless { it == RouteTraffic.UNKNOWN }
+            val point = "P,$index,${(lat * 1e6).roundToInt()},${(lon * 1e6).roundToInt()}"
+            commands.add(if (traffic == null) point else "$point,${traffic.ordinal}")
         }
         commands.add("E")
         return commands

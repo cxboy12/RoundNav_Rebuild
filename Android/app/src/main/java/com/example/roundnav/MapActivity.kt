@@ -35,6 +35,7 @@ import vn.vietmap.vietmapsdk.style.layers.CircleLayer
 import vn.vietmap.vietmapsdk.style.layers.FillLayer
 import vn.vietmap.vietmapsdk.style.layers.LineLayer
 import vn.vietmap.vietmapsdk.style.layers.PropertyFactory.*
+import vn.vietmap.vietmapsdk.style.expressions.Expression
 import vn.vietmap.vietmapsdk.style.sources.GeoJsonSource
 import vn.vietmap.vietmapsdk.style.sources.VectorSource
 import com.mapbox.geojson.Feature
@@ -253,7 +254,8 @@ class MapActivity : ComponentActivity() {
                 coordinates.toList().chunked(2).map { (lon, lat) -> lon to lat },
                 savedInstanceState.getDouble("routeDistance", Double.NaN).takeIf { it.isFinite() },
                 savedInstanceState.getDouble("routeDuration", Double.NaN).takeIf { it.isFinite() },
-                RouteTurn.decode(savedInstanceState.getIntArray("routeTurns"))
+                RouteTurn.decode(savedInstanceState.getIntArray("routeTurns")),
+                RouteTraffic.decode(savedInstanceState.getIntArray("routeTraffic"))
             )
             val origin = LatLng(savedInstanceState.getDouble("routeOriginLat"), savedInstanceState.getDouble("routeOriginLon"))
             showPreview(Preview(route, origin, savedInstanceState.getBoolean("routeIndoor"),
@@ -281,6 +283,9 @@ class MapActivity : ComponentActivity() {
         }, LinearLayout.LayoutParams(0, -2, 1f))
         root.addView(starts)
         routeStatus = TextView(this)
+        routeStatus.setPadding(dp(14), dp(10), dp(14), dp(10))
+        routeStatus.setTextColor(Color.rgb(35, 49, 69))
+        routeStatus.setBackgroundColor(Color.rgb(236, 243, 248))
         root.addView(routeStatus)
         sendStatus = TextView(this)
         root.addView(sendStatus)
@@ -363,6 +368,16 @@ class MapActivity : ComponentActivity() {
         } ?: "时间未知"
         routeStatus.text = String.format(Locale.CHINA, "%s  %.6f, %.6f\n%s · %s",
             originLabel, value.origin.latitude, value.origin.longitude, distance, duration)
+        val traffic = value.route.traffic
+        val totals = DoubleArray(RouteTraffic.entries.size)
+        for ((index, level) in traffic.withIndex()) {
+            val (aLon, aLat) = value.route.coordinates[index]
+            val (bLon, bLat) = value.route.coordinates[index + 1]
+            totals[level.ordinal] += RoadMap.distanceMeters(aLat, aLon, bLat, bLon)
+        }
+        val known = RouteTraffic.entries.drop(1).filter { totals[it.ordinal] > 0 }
+        if (known.isEmpty()) routeStatus.append("\n路况数据暂不可用")
+        else routeStatus.append("\n" + known.joinToString("  ·  ") { "${it.label} ${totals[it.ordinal].roundToLong()} 米" })
         showPlayback()
         if (fit) {
             followPhone = false
@@ -551,6 +566,7 @@ class MapActivity : ComponentActivity() {
         preview?.let { value ->
             out.putDoubleArray("routeCoordinates", value.route.coordinates.flatMap { listOf(it.first, it.second) }.toDoubleArray())
             out.putIntArray("routeTurns", RouteTurn.encode(value.route.turns))
+            out.putIntArray("routeTraffic", value.route.traffic.map { it.ordinal }.toIntArray())
             out.putDouble("routeDistance", value.route.distanceKm ?: Double.NaN)
             out.putDouble("routeDuration", value.route.durationSeconds ?: Double.NaN)
             out.putDouble("routeOriginLat", value.origin.latitude)
@@ -576,6 +592,7 @@ class MapActivity : ComponentActivity() {
     }
 
     private fun installOverlays(style: Style) {
+        (style.getLayer("building") as? FillLayer)?.minZoom = 15f
         val empty = FeatureCollection.fromFeatures(emptyArray<Feature>())
         for (name in listOf("accuracy", "route", "origin", "position", "destination", "playback")) {
             style.addSource(GeoJsonSource("roundnav-$name", empty))
@@ -584,7 +601,7 @@ class MapActivity : ComponentActivity() {
             fillColor(Color.rgb(53, 136, 217)), fillOpacity(0.15f)
         ))
         style.addLayer(LineLayer("roundnav-route", "roundnav-route").withProperties(
-            lineColor(Color.rgb(105, 55, 196)), lineWidth(5f)
+            lineColor(Expression.get("color")), lineWidth(5f)
         ))
         val markerColors = mapOf("origin" to 0xFF1C8052.toInt(), "position" to 0xFF2371C8.toInt(),
             "destination" to 0xFFCC372D.toInt(), "playback" to 0xFFE27000.toInt())
@@ -602,11 +619,12 @@ class MapActivity : ComponentActivity() {
         val bounds = controller.projection.visibleRegion.latLngBounds
         if (roadViewport == bounds) return
         val source = mapStyle?.getSourceAs<VectorSource>("openmaptiles") ?: return
-        val features = source.querySourceFeatures(arrayOf("road"), null)
-        if (features.isEmpty()) return
-        VietmapViewportRoads.publish(bounds, features)
+        val roads = source.querySourceFeatures(arrayOf("road"), null)
+        if (roads.isEmpty()) return
+        val buildings = source.querySourceFeatures(arrayOf("building"), null)
+        VietmapViewportRoads.publish(bounds, roads, buildings)
         roadViewport = bounds
-        android.util.Log.i("RoundNavVietmap", "SDK road features loaded: ${features.size}")
+        android.util.Log.i("RoundNavVietmap", "SDK features loaded: roads=${roads.size} buildings=${buildings.size}")
     }
 
     private fun updateOverlays() {
@@ -631,9 +649,21 @@ class MapActivity : ComponentActivity() {
         update("destination", selected?.geoJson())
         update("origin", preview?.origin?.geoJson())
         update("playback", playbackPoint?.geoJson())
-        update("route", preview?.route?.coordinates?.let { shape ->
-            LineString.fromLngLats(shape.map { (lon, lat) -> Point.fromLngLat(lon, lat) })
-        })
+        val segments = preview?.route?.let { route ->
+            buildList {
+                var start = 0
+                while (start < route.coordinates.lastIndex) {
+                    val level = route.traffic.getOrElse(start) { RouteTraffic.UNKNOWN }
+                    var end = start + 1
+                    while (end < route.coordinates.lastIndex &&
+                        route.traffic.getOrElse(end) { RouteTraffic.UNKNOWN } == level) end++
+                    val points = route.coordinates.subList(start, end + 1).map { (lon, lat) -> Point.fromLngLat(lon, lat) }
+                    add(Feature.fromGeometry(LineString.fromLngLats(points)).apply { addStringProperty("color", level.rgb) })
+                    start = end
+                }
+            }
+        }.orEmpty()
+        style.getSourceAs<GeoJsonSource>("roundnav-route")?.setGeoJson(FeatureCollection.fromFeatures(segments))
     }
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()

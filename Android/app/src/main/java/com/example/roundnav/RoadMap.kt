@@ -85,10 +85,13 @@ internal object RoadMap {
     }
 
     fun commands(roads: List<NearbyRoad>, lat: Double, lon: Double): List<String> {
-        val selected = selectRoads(roads, lat, lon)
+        val (buildings, streets) = roads.partition { it.type == "building" }
+        val nearbyBuildings = selectRoads(buildings, lat, lon).take(12)
+        val selected = nearbyBuildings + selectRoads(streets, lat, lon).take(40 - nearbyBuildings.size)
         val lines = mutableListOf("RS,${selected.size}", "RC,${(lat * 1e6).roundToInt()},${(lon * 1e6).roundToInt()}")
         selected.forEachIndexed { id, road ->
-            val points = simplify(road.points)
+            val building = road.type == "building"
+            val points = simplify(road.points, if (building) 12 else 80)
             val roadClass = when (road.type.lowercase()) {
                 "motorway", "motorway_link" -> 0
                 "trunk", "trunk_link" -> 1
@@ -96,7 +99,7 @@ internal object RoadMap {
                 "secondary", "secondary_link" -> 3
                 else -> 4
             }
-            lines.add("RB,$id,${points.size},$roadClass")
+            lines.add("RB,$id,${points.size},$roadClass" + if (building) ",1" else "")
             points.forEachIndexed { index, p ->
                 lines.add("RP,$id,$index,${(p.second * 1e6).roundToInt()},${(p.first * 1e6).roundToInt()}")
             }

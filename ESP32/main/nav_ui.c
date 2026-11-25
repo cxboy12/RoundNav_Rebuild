@@ -27,10 +27,10 @@
 #define SAMPLE_ONE (1 << SAMPLE_SHIFT)
 #define DEG_TO_RAD 0.017453292519943295
 #define NORTH_PIXELS_PER_E6 (DEG_TO_RAD * EARTH_M / 1000000.0 * MAP_RADIUS_PX / MAP_RADIUS_M)
-#define SCREEN_BG_RGB 0x111111
-#define MAP_BG_RGB 0x252525
-#define MAP_BORDER_RGB 0x4B4B4B
-#define ROUTE_RGB 0xBE75FF
+#define SCREEN_BG_RGB 0x0C141C
+#define MAP_BG_RGB 0x192635
+#define MAP_BORDER_RGB 0x39536A
+#define ROUTE_RGB 0x4783DD
 
 static const char *TAG = "RoundNavUI";
 
@@ -60,6 +60,7 @@ static int s_view_dx, s_view_dy, s_view_heading = -1;
 static lv_obj_t *s_ble_label;
 static lv_obj_t *s_nav_label;
 static lv_obj_t *s_distance_label;
+static lv_obj_t *s_nav_card;
 static lv_obj_t *s_nav_arrow_lines[2];
 static lv_obj_t *s_route_line;
 static lv_obj_t *s_road_lines[ROAD_MAX_COUNT];
@@ -69,8 +70,10 @@ static lv_point_precise_t s_route_screen[ROUTE_MAX_POINTS];
 static lv_point_precise_t s_marker_points[MARKER_ROWS][2];
 static road_store_t s_road_store;
 static geo_point_t s_route[ROUTE_MAX_POINTS];
+static uint8_t s_route_traffic[ROUTE_MAX_POINTS];
 static int s_route_count;
 static geo_point_t s_pending_route[ROUTE_MAX_POINTS];
+static uint8_t s_pending_traffic[ROUTE_MAX_POINTS];
 static int s_pending_route_expected;
 static int s_pending_route_count;
 /* Double preserves sub-metre movement at absolute longitude ~121 degrees. */
@@ -148,17 +151,29 @@ static lv_color_t road_color(int road_class)
     case 1: return lv_color_hex(0xD7D5D1); /* trunk */
     case 2: return lv_color_hex(0xB7B6B2); /* primary */
     case 3: return lv_color_hex(0x999894); /* secondary */
+    case ROAD_CLASS_BUILDING: return lv_color_hex(0x526C85);
     default: return lv_color_hex(0x74736F); /* local roads */
     }
 }
 
 static int road_width(int road_class)
 {
+    if (road_class == ROAD_CLASS_BUILDING) return 1;
     if (road_class <= 0) return 6;
     if (road_class == 1) return 5;
     if (road_class == 2) return 4;
     if (road_class == 3) return 3;
     return 2;
+}
+
+static lv_color_t route_color(uint8_t traffic)
+{
+    switch (traffic) {
+    case 1: return lv_color_hex(0x16A477);
+    case 2: return lv_color_hex(0xDF8414);
+    case 3: return lv_color_hex(0xD84454);
+    default: return lv_color_hex(ROUTE_RGB);
+    }
 }
 
 static void start_cache_build(map_cache_t *back)
@@ -202,6 +217,7 @@ static void draw_cache_batch(const map_cache_t *back)
         line.round_start = line.round_end = true;
         project_point(&points[s_build_point - 1], &back->origin, 1, 0, ROAD_BITMAP_PX / 2, &line.p1);
         while (budget > 0 && s_build_point < count) {
+            if (route) line.color = route_color(s_route_traffic[s_build_point - 1]);
             project_point(&points[s_build_point++], &back->origin, 1, 0, ROAD_BITMAP_PX / 2, &line.p2);
             lv_draw_line(&layer, &line);
             line.p1 = line.p2;
@@ -460,16 +476,16 @@ static void display_event(lv_event_t *event)
 static void draw_nav_arrow(void)
 {
     static const lv_point_precise_t straight[2][3] = {
-        {{233, 39}, {233, 10}}, {{222, 22}, {233, 10}, {244, 22}}
+        {{27, 37}, {27, 8}}, {{16, 20}, {27, 8}, {38, 20}}
     };
     static const lv_point_precise_t left[2][3] = {
-        {{233, 39}, {233, 19}, {214, 19}}, {{224, 9}, {214, 19}, {224, 29}}
+        {{27, 37}, {27, 17}, {8, 17}}, {{18, 7}, {8, 17}, {18, 27}}
     };
     static const lv_point_precise_t right[2][3] = {
-        {{233, 39}, {233, 19}, {252, 19}}, {{242, 9}, {252, 19}, {242, 29}}
+        {{27, 37}, {27, 17}, {46, 17}}, {{36, 7}, {46, 17}, {36, 27}}
     };
     static const lv_point_precise_t uturn[2][3] = {
-        {{233, 10}, {233, 39}}, {{222, 28}, {233, 39}, {244, 28}}
+        {{27, 8}, {27, 37}}, {{16, 26}, {27, 37}, {38, 26}}
     };
     const lv_point_precise_t (*src)[3] = straight;
     if (s_direction == 'L') src = left;
@@ -479,10 +495,10 @@ static void draw_nav_arrow(void)
     const bool hide_arrow = s_direction == 'S' && s_distance_m <= 0;
     for (int i = 0; i < 2; ++i) {
         if (s_nav_arrow_lines[i] == NULL) {
-            s_nav_arrow_lines[i] = lv_line_create(lv_screen_active());
-            lv_obj_set_pos(s_nav_arrow_lines[i], 0, 0);
-            lv_obj_set_size(s_nav_arrow_lines[i], 466, 466);
-            lv_obj_set_style_line_color(s_nav_arrow_lines[i], lv_color_white(), 0);
+            s_nav_arrow_lines[i] = lv_line_create(s_nav_card);
+            lv_obj_align(s_nav_arrow_lines[i], LV_ALIGN_LEFT_MID, 8, 0);
+            lv_obj_set_size(s_nav_arrow_lines[i], 56, 45);
+            lv_obj_set_style_line_color(s_nav_arrow_lines[i], lv_color_hex(0x87E1D0), 0);
             lv_obj_set_style_line_width(s_nav_arrow_lines[i], 6, 0);
             lv_obj_set_style_line_rounded(s_nav_arrow_lines[i], true, 0);
             lv_obj_set_clickable(s_nav_arrow_lines[i], false);
@@ -503,6 +519,7 @@ static void update_nav_label(void)
     else if (s_direction == 'U') word = "U-TURN";
     else if (s_distance_m == 0) word = "ARRIVED";
     else if (s_distance_m < 0) word = "";
+    lv_obj_set_hidden(s_nav_card, word[0] == '\0');
     lv_label_set_text(s_nav_label, word);
     draw_nav_arrow();
     char d[32];
@@ -639,17 +656,31 @@ void nav_ui_init(void)
     if (!s_camera_refresh_ready || !init_cached_map()) create_map_surround(screen);
     ESP_LOGI(TAG, "Road renderer: %s", s_map_view ? "RGB565 cache" : "vector fallback");
 
-    s_nav_label = lv_label_create(screen);
+    s_nav_card = lv_obj_create(screen);
+    lv_obj_set_size(s_nav_card, 174, 61);
+    lv_obj_align(s_nav_card, LV_ALIGN_TOP_MID, 0, 37);
+    lv_obj_set_style_radius(s_nav_card, 16, 0);
+    lv_obj_set_style_bg_color(s_nav_card, lv_color_hex(SCREEN_BG_RGB), 0);
+    lv_obj_set_style_border_color(s_nav_card, lv_color_hex(MAP_BORDER_RGB), 0);
+    lv_obj_set_style_border_width(s_nav_card, 1, 0);
+    lv_obj_set_style_pad_all(s_nav_card, 0, 0);
+    lv_obj_set_scrollable(s_nav_card, false);
+    lv_obj_set_clickable(s_nav_card, false);
+    lv_obj_set_hidden(s_nav_card, true);
+
+    s_nav_label = lv_label_create(s_nav_card);
     lv_label_set_text(s_nav_label, "");
     lv_obj_set_style_text_color(s_nav_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(s_nav_label, LV_FONT_DEFAULT, 0);
-    lv_obj_align(s_nav_label, LV_ALIGN_TOP_MID, 0, 52);
+    lv_obj_align(s_nav_label, LV_ALIGN_TOP_LEFT, 69, 8);
 
-    s_distance_label = lv_label_create(screen);
+    s_distance_label = lv_label_create(s_nav_card);
     lv_label_set_text(s_distance_label, "");
     lv_obj_set_style_text_color(s_distance_label, lv_color_hex(0xD4DCE5), 0);
-    lv_obj_set_style_text_font(s_distance_label, LV_FONT_DEFAULT, 0);
-    lv_obj_align(s_distance_label, LV_ALIGN_TOP_MID, 0, 82);
+#if LV_FONT_MONTSERRAT_24
+    lv_obj_set_style_text_font(s_distance_label, &lv_font_montserrat_24, 0);
+#endif
+    lv_obj_align(s_distance_label, LV_ALIGN_BOTTOM_LEFT, 69, -6);
 
     s_ble_label = lv_label_create(screen);
     lv_label_set_text(s_ble_label, "BLE WAIT");
@@ -711,9 +742,11 @@ void nav_ui_apply_map_event(const roundnav_event_t *event)
         const int index = event->index;
         if (index >= 0 && index < s_pending_route_expected && index == s_pending_route_count) {
             s_pending_route[index] = (geo_point_t){ .lat = event->lat_e6, .lon = event->lon_e6 };
+            s_pending_traffic[index] = event->traffic;
             ++s_pending_route_count;
         } else if (!(index >= 0 && index < s_pending_route_expected && index < s_pending_route_count &&
-                     s_pending_route[index].lat == event->lat_e6 && s_pending_route[index].lon == event->lon_e6)) {
+                     s_pending_route[index].lat == event->lat_e6 && s_pending_route[index].lon == event->lon_e6 &&
+                     s_pending_traffic[index] == event->traffic)) {
             /* A retried ATT packet can repeat points already queued by its first write. */
             s_pending_route_expected = 0;
         }
@@ -721,6 +754,7 @@ void nav_ui_apply_map_event(const roundnav_event_t *event)
         if (s_pending_route_expected > 0 && s_pending_route_count == s_pending_route_expected) {
             s_route_count = s_pending_route_count;
             memcpy(s_route, s_pending_route, s_route_count * sizeof(*s_route));
+            memcpy(s_route_traffic, s_pending_traffic, s_route_count);
             if (s_map_view) {
                 s_cache_dirty = true;
                 wake_display();

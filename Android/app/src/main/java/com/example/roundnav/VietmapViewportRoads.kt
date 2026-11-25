@@ -3,6 +3,8 @@ package com.example.roundnav
 import com.mapbox.geojson.Feature
 import com.mapbox.geojson.LineString
 import com.mapbox.geojson.MultiLineString
+import com.mapbox.geojson.MultiPolygon
+import com.mapbox.geojson.Polygon
 import vn.vietmap.vietmapsdk.geometry.LatLng
 import vn.vietmap.vietmapsdk.geometry.LatLngBounds
 import kotlin.math.cos
@@ -14,7 +16,7 @@ internal object VietmapViewportRoads {
 
     @Volatile private var snapshot: Snapshot? = null
 
-    fun publish(bounds: LatLngBounds, features: List<Feature>) {
+    fun publish(bounds: LatLngBounds, features: List<Feature>, buildings: List<Feature>) {
         val roads = buildList {
             for (feature in features) {
                 val type = feature.getStringProperty("class") ?: "road"
@@ -30,7 +32,21 @@ internal object VietmapViewportRoads {
                 }
             }
         }.distinct()
-        if (roads.isNotEmpty()) snapshot = Snapshot(bounds, roads)
+        if (roads.isEmpty()) return
+        val outlines = buildList {
+            for (feature in buildings) {
+                val polygons = when (val geometry = feature.geometry()) {
+                    is Polygon -> listOf(geometry)
+                    is MultiPolygon -> geometry.polygons()
+                    else -> continue
+                }
+                for (polygon in polygons) {
+                    val ring = polygon.coordinates().firstOrNull()?.takeIf { it.size >= 4 } ?: continue
+                    add(NearbyRoad("", "building", ring.map { it.longitude() to it.latitude() }))
+                }
+            }
+        }.distinct()
+        snapshot = Snapshot(bounds, roads + outlines)
     }
 
     fun nearby(lat: Double, lon: Double, radius: Double): List<NearbyRoad> {
@@ -43,6 +59,6 @@ internal object VietmapViewportRoads {
         val lonMargin = screenRadius / eastScale
         if (!current.bounds.contains(LatLng(lat - latMargin, lon - lonMargin)) ||
             !current.bounds.contains(LatLng(lat + latMargin, lon + lonMargin))) return emptyList()
-        return RoadMap.selectRoads(current.roads, lat, lon)
+        return current.roads
     }
 }

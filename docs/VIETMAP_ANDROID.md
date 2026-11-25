@@ -14,7 +14,11 @@
 
 `VIETMAP_ROUTE_URL` 是 RoundNav 的 HTTPS 路线代理地址，接收两个 `point=纬度,经度` 参数，返回 Vietmap Route v4 的 polyline5 响应。部署时把 Services key 配在服务端，并给代理接入产品的鉴权和额度控制。
 
+路线代理向 Vietmap 请求 `annotations=congestion,congestion_distance`。Android 根据实际返回的 `annotations.congestion` 起止点索引标记路线分段。绿、橙、红分别表示畅通、缓行和拥堵，蓝色表示没有对应数据。发布用代理也需要请求并透传这部分响应。手机显示按路线形状计算的分段距离，路况随重新规划获取。
+
 Android 默认从官方 SDK 已加载的街道视野读取 `road` 图层。圆屏仍使用现有的道路批次格式。手机底图需要覆盖圆屏当前所在区域。`VIETMAP_ROADS_URL` 可配置授权的 Vietmap 周边道路服务，接收 `lat`、`lon` 和 `radius`（米），返回包含 `roads` 或 `features` 的 JSON，道路线坐标为经纬度顺序。使用该接口可独立于手机地图视野补图。Vietmap 返回的测试瓦片不能由普通 MVT 解码器读取，SDK 负责处理原始瓦片。
+
+手机在较近缩放级显示 Vietmap 建筑平面。SDK 视野有建筑数据时，圆屏每批最多附带 12 个简化外轮廓，每个最多 12 点，整个批次仍最多 40 项。`RB,id,count,4,1` 的末尾 `1` 表示建筑；`P,index,lat,lon,traffic` 的末尾可选字段表示从该点到下一点的路况，`1` 到 `3` 依次为畅通、缓行、拥堵。旧固件会读入原有字段，使用原配色绘制。新固件的缓存路径按分段着色，低内存矢量回退使用统一路线颜色。
 
 目前可识别 Route v4 的普通、轻微及急转左右方向。分岔、环岛和掉头的代码需要用 Vietmap 对应样例复核后接入圆屏提示。真实 GPS 路线跟踪仍按项目计划验收。
 

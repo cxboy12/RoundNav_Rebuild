@@ -54,7 +54,8 @@ class VietmapProxy(BaseHTTPRequestHandler):
 
         query = urlencode([
             ("point", start), ("point", destination), ("vehicle", "motorcycle"),
-            ("points_encoded", "true"), ("apikey", self.server.services_key),
+            ("points_encoded", "true"), ("annotations", "congestion,congestion_distance"),
+            ("apikey", self.server.services_key),
         ])
         try:
             with urlopen("https://maps.vietmap.vn/api/route/v4?" + query, timeout=20) as response:

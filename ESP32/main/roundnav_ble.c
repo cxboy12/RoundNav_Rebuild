@@ -15,6 +15,7 @@
 #include "services/gatt/ble_svc_gatt.h"
 #include "roundnav_ble.h"
 #include "roundnav_events.h"
+#include "road_store.h"
 
 static const char *TAG = "RoundNavBLE";
 static QueueHandle_t s_event_queue;
@@ -70,10 +71,13 @@ static int parse_line(char *line)
         ev.type = ROUNDNAV_EVENT_ROAD_CENTER; ev.lat_e6 = a; ev.lon_e6 = b;
         return post_event(&ev) ? 0 : -1;
     }
-    /* Road begin: RB,id,count,class */
-    if (sscanf(line, " RB , %d , %d , %d", &a, &b, &c) == 3 && toupper((unsigned char)line[0]) == 'R' && toupper((unsigned char)line[1]) == 'B') {
+    /* The optional building flag follows the legacy road class. */
+    const int road_fields = sscanf(line, " RB , %d , %d , %d , %d", &a, &b, &c, &d);
+    if (road_fields >= 3 && toupper((unsigned char)line[0]) == 'R' && toupper((unsigned char)line[1]) == 'B') {
         if (a < 0 || a >= 40 || b < 2 || b > 80 || c < 0 || c > 4) return -1;
-        ev.type = ROUNDNAV_EVENT_ROAD_BEGIN; ev.road_id = a; ev.count = b; ev.road_class = c;
+        if (road_fields == 4 && (c != 4 || d != 1)) return -1;
+        ev.type = ROUNDNAV_EVENT_ROAD_BEGIN; ev.road_id = a; ev.count = b;
+        ev.road_class = road_fields == 4 ? ROAD_CLASS_BUILDING : c;
         return post_event(&ev) ? 0 : -1;
     }
     /* Road point: RP,id,index,lat_e6,lon_e6 */
@@ -94,10 +98,13 @@ static int parse_line(char *line)
         ev.type = ROUNDNAV_EVENT_MAP_BEGIN; ev.count = a;
         return post_event(&ev) ? 0 : -1;
     }
-    /* Route point: P,index,lat_e6,lon_e6 */
-    if (sscanf(line, " %c , %d , %d , %d", &kind, &a, &b, &c) == 4 && (kind == 'P' || kind == 'p')) {
+    /* Route point: optional traffic code applies from this point to the next. */
+    const int point_fields = sscanf(line, " %c , %d , %d , %d , %d", &kind, &a, &b, &c, &d);
+    if (point_fields >= 4 && (kind == 'P' || kind == 'p')) {
         if (a < 0 || a >= 500 || b < -90000000 || b > 90000000 || c < -180000000 || c > 180000000) return -1;
+        if (point_fields == 5 && (d < 0 || d > 3)) return -1;
         ev.type = ROUNDNAV_EVENT_MAP_POINT; ev.index = a; ev.lat_e6 = b; ev.lon_e6 = c;
+        ev.traffic = point_fields == 5 ? d : 0;
         return post_event(&ev) ? 0 : -1;
     }
     if (strcmp(line, "E") == 0 || strcmp(line, "e") == 0) {

@@ -3,6 +3,7 @@
 
 #define ROAD_MAX_COUNT 40
 #define ROAD_MAX_POINTS 80
+#define ROAD_CLASS_BUILDING 5
 
 typedef struct { int32_t lat; int32_t lon; } geo_point_t;
 typedef struct {

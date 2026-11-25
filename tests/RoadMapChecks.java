@@ -96,6 +96,16 @@ public final class RoadMapChecks {
                 sampled.getCoordinates().get(after.getShapeIndex()).equals(guidanceShape.get(before.getShapeIndex())),
                 "A sampled route keeps the original turn coordinate and remaps its index");
         }
+        List<RouteTraffic> traffic = new ArrayList<>(java.util.Collections.nCopies(1199, RouteTraffic.CLEAR));
+        traffic.set(555, RouteTraffic.BUSY);
+        RouteResult trafficRoute = RouteApi.INSTANCE.displayRoute(new RouteResult(guidanceShape, null, null, longTurns, traffic));
+        int busy = trafficRoute.getCoordinates().indexOf(guidanceShape.get(555));
+        verify(busy >= 0 && trafficRoute.getTraffic().size() == trafficRoute.getCoordinates().size() - 1 &&
+            trafficRoute.getCoordinates().get(busy + 1).equals(guidanceShape.get(556)) &&
+            trafficRoute.getTraffic().get(busy) == RouteTraffic.BUSY,
+            "Route sampling preserves both vertices of a short congested edge");
+        verify(RouteApi.INSTANCE.toBleCommands(trafficRoute).get(busy + 1).endsWith(",3"),
+            "Traffic is appended to the route point that starts the colored segment");
 
         NearbyRoad crossing = road("crossing", lon - .003, lat, lon + .003, lat);
         NearbyRoad nearby = road("nearby", lon + .001, lat, lon + .001, lat + .001);
@@ -117,6 +127,13 @@ public final class RoadMapChecks {
         verify(lines.stream().anyMatch(s -> s.equals("RP,0,0,29868300,121544000")), "BLE uses latitude then longitude in microdegrees");
         verify(lines.stream().allMatch(s -> s.getBytes(java.nio.charset.StandardCharsets.UTF_8).length + 1 <= 61), "Every command fits the minimum accepted ATT payload");
         verify(lines.size() < 4000, "A maximum road snapshot fits the queue");
+        NearbyRoad building = new NearbyRoad("", "building",
+            road("", lon, lat, lon + .0001, lat, lon, lat + .0001, lon, lat).getPoints());
+        manyRoads.add(0, building);
+        List<String> detailed = map.commands(manyRoads, lat, lon);
+        verify(detailed.get(0).equals("RS,40") && detailed.get(2).equals("RB,0,4,4,1") &&
+            detailed.stream().filter(s -> s.startsWith("RB,")).count() == 40,
+            "Buildings use an optional tag and stay within the road transaction limit");
         System.out.println("RoadMap: " + checks + " checks passed");
     }
 }

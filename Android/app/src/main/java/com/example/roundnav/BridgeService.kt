@@ -53,6 +53,7 @@ class BridgeService : Service() {
         private const val EXTRA_PLAYBACK_ID = "playbackId"
         private const val EXTRA_PLAYBACK_POINTS = "playbackPoints"
         private const val EXTRA_PLAYBACK_TURNS = "playbackTurns"
+        private const val EXTRA_PLAYBACK_TRAFFIC = "playbackTraffic"
         private const val EXTRA_PLAYBACK_SPEED = "playbackSpeed"
         internal const val ROUTE_QUEUED = 1
         const val EXTRA_LINE = "line"
@@ -88,6 +89,7 @@ class BridgeService : Service() {
                 .putExtra(EXTRA_PLAYBACK_ID, id)
                 .putExtra(EXTRA_PLAYBACK_POINTS, points)
                 .putExtra(EXTRA_PLAYBACK_TURNS, RouteTurn.encode(route.turns))
+                .putExtra(EXTRA_PLAYBACK_TRAFFIC, route.traffic.map { it.ordinal }.toIntArray())
                 .putExtra(EXTRA_PLAYBACK_SPEED, speed))
         }
 
@@ -295,7 +297,8 @@ class BridgeService : Service() {
             if (running && id != null) {
                 when (intent.action) {
                     ACTION_START_PLAYBACK -> beginPlayback(id, intent.getDoubleArrayExtra(EXTRA_PLAYBACK_POINTS),
-                        RouteTurn.decode(intent.getIntArrayExtra(EXTRA_PLAYBACK_TURNS)), speed)
+                        RouteTurn.decode(intent.getIntArrayExtra(EXTRA_PLAYBACK_TURNS)),
+                        RouteTraffic.decode(intent.getIntArrayExtra(EXTRA_PLAYBACK_TRAFFIC)), speed)
                     ACTION_TOGGLE_PLAYBACK -> playback?.takeIf { it.id == id }?.let(::togglePlayback)
                     ACTION_PLAYBACK_SPEED -> playback?.takeIf { it.id == id && speed in 5..15 }?.let {
                         advancePlayback(it, SystemClock.uptimeMillis())
@@ -493,7 +496,7 @@ class BridgeService : Service() {
         if (!queued) finishRouteSend("蓝牙队列繁忙或数据长度不足，请重试")
     }
 
-    private fun beginPlayback(id: String, points: DoubleArray?, turns: List<RouteTurn>, speed: Int) {
+    private fun beginPlayback(id: String, points: DoubleArray?, turns: List<RouteTurn>, traffic: List<RouteTraffic>, speed: Int) {
         if (txCharacteristic == null || routeReceiver != null) {
             failPlayback(id, "请等待蓝牙就绪及路线发送完成，再开始模拟")
             return
@@ -524,7 +527,7 @@ class BridgeService : Service() {
         playback = active
         playbackStatus = PlaybackStatus(id, PlaybackPhase.UPLOADING, totalMeters = path.totalMeters)
         status = status.copy(location = "正在准备沿线模拟 · 非手机位置")
-        val commands = RouteApi.toBleCommands(RouteResult(coordinates, null, null))
+        val commands = RouteApi.toBleCommands(RouteResult(coordinates, null, null, traffic = traffic))
         val queued = enqueueBatch(commands) {
             if (playback === active) {
                 Log.i(TAG, "Playback route ATT writes complete: points=${coordinates.size}")

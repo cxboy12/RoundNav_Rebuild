@@ -39,7 +39,8 @@ int road_store_apply(road_store_t *store, const roundnav_event_t *event)
     road_t *road = store->receiving ? &store->pending[id] : &store->roads[id];
     switch (event->type) {
     case ROUNDNAV_EVENT_ROAD_BEGIN:
-        if (event->count < 2 || event->count > ROAD_MAX_POINTS || event->road_class < 0 || event->road_class > 4) return -1;
+        if (event->count < 2 || event->count > ROAD_MAX_POINTS || event->road_class < 0 ||
+            event->road_class > ROAD_CLASS_BUILDING) return -1;
         memset(road, 0, sizeof(*road));
         road->count = event->count;
         road->road_class = event->road_class;

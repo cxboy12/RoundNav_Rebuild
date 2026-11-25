@@ -30,4 +30,5 @@ typedef struct {
     int32_t road_id;
     int32_t road_class;
     int32_t bearing_deg;
+    uint8_t traffic;
 } roundnav_event_t;
