@@ -1,6 +1,6 @@
 # RoundNav 后续功能计划
 
-2026-11-25 确认越南首发走 Android 蓝牙导航。Vietmap 底图和摩托车路线已通过本机与手机验证，发布用 HTTPS 路线代理和圆屏实物回放待验收。接入方式见 [Vietmap Android](docs/VIETMAP_ANDROID.md)。
+2026-11-25 确认越南首发走 Android 蓝牙导航。Vietmap 底图和摩托车路线已通过手机验证，浅色圆屏固件已实机接收道路、建筑和拥堵分段并完成短程模拟检查。发布用 HTTPS 路线代理和圆屏全程回放待验收。接入方式见 [Vietmap Android](docs/VIETMAP_ANDROID.md)。
 
 按用户于 2026-11-22 确认的顺序推进，每轮项目修改提交 Git 并同步已授权的 GitHub 仓库。
 

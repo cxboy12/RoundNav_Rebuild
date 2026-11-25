@@ -27,10 +27,12 @@
 #define SAMPLE_ONE (1 << SAMPLE_SHIFT)
 #define DEG_TO_RAD 0.017453292519943295
 #define NORTH_PIXELS_PER_E6 (DEG_TO_RAD * EARTH_M / 1000000.0 * MAP_RADIUS_PX / MAP_RADIUS_M)
-#define SCREEN_BG_RGB 0x0C141C
-#define MAP_BG_RGB 0x192635
-#define MAP_BORDER_RGB 0x39536A
-#define ROUTE_RGB 0x4783DD
+#define SCREEN_BG_RGB 0x0B1926
+#define MAP_BG_RGB 0xD6E8F4
+#define MAP_BORDER_RGB 0x4F90A7
+#define BUILDING_RGB 0x9FBCD3
+#define POSITION_RGB 0x123B58
+#define ROUTE_RGB 0x246BCA
 
 static const char *TAG = "RoundNavUI";
 
@@ -147,32 +149,70 @@ static void project_point(const geo_point_t *p, const map_origin_t *origin, floa
 static lv_color_t road_color(int road_class)
 {
     switch (road_class) {
-    case 0: return lv_color_hex(0xF0EFEB); /* motorway */
-    case 1: return lv_color_hex(0xD7D5D1); /* trunk */
-    case 2: return lv_color_hex(0xB7B6B2); /* primary */
-    case 3: return lv_color_hex(0x999894); /* secondary */
-    case ROAD_CLASS_BUILDING: return lv_color_hex(0x526C85);
-    default: return lv_color_hex(0x74736F); /* local roads */
+    case 0: return lv_color_hex(0x172638); /* motorway */
+    case 1: return lv_color_hex(0x24374C); /* trunk */
+    case 2: return lv_color_hex(0x31465D); /* primary */
+    case 3: return lv_color_hex(0x4B6278); /* secondary */
+    case ROAD_CLASS_BUILDING: return lv_color_hex(BUILDING_RGB);
+    default: return lv_color_hex(0x6D859D); /* local roads */
     }
 }
 
 static int road_width(int road_class)
 {
     if (road_class == ROAD_CLASS_BUILDING) return 1;
-    if (road_class <= 0) return 6;
-    if (road_class == 1) return 5;
-    if (road_class == 2) return 4;
-    if (road_class == 3) return 3;
-    return 2;
+    if (road_class <= 0) return 9;
+    if (road_class == 1) return 7;
+    if (road_class == 2) return 6;
+    if (road_class == 3) return 4;
+    return 3;
 }
 
 static lv_color_t route_color(uint8_t traffic)
 {
     switch (traffic) {
-    case 1: return lv_color_hex(0x16A477);
-    case 2: return lv_color_hex(0xDF8414);
-    case 3: return lv_color_hex(0xD84454);
+    case 1: return lv_color_hex(0x008859);
+    case 2: return lv_color_hex(0xDE7800);
+    case 3: return lv_color_hex(0xCD293D);
     default: return lv_color_hex(ROUTE_RGB);
+    }
+}
+
+static void fill_building(const map_cache_t *back, const road_t *road)
+{
+    lv_point_precise_t outline[BUILDING_MAX_POINTS];
+    const int count = road->count;
+    int top = ROAD_BITMAP_PX;
+    int bottom = -1;
+    for (int i = 0; i < count; ++i) {
+        project_point(&road->points[i], &back->origin, 1, 0, ROAD_BITMAP_PX / 2, &outline[i]);
+        top = LV_MIN(top, (int)outline[i].y);
+        bottom = LV_MAX(bottom, (int)outline[i].y);
+    }
+    const uint16_t color = lv_color_to_u16(lv_color_hex(BUILDING_RGB));
+    /* Even-odd spans follow concave footprints. Count each shared vertex once. */
+    for (int y = LV_MAX(top, 0); y < LV_MIN(bottom, ROAD_BITMAP_PX); ++y) {
+        int crossings[BUILDING_MAX_POINTS];
+        int used = 0;
+        for (int i = 0, previous = count - 1; i < count; previous = i++) {
+            const int ay = (int)outline[previous].y;
+            const int by = (int)outline[i].y;
+            if ((ay > y) == (by > y)) continue;
+            const int ax = (int)outline[previous].x;
+            const int bx = (int)outline[i].x;
+            const int x = ax + (int)((int64_t)(y - ay) * (bx - ax) / (by - ay));
+            int position = used++;
+            while (position > 0 && crossings[position - 1] > x) {
+                crossings[position] = crossings[position - 1];
+                --position;
+            }
+            crossings[position] = x;
+        }
+        uint16_t *row = back->pixels + y * s_cache_stride;
+        for (int i = 1; i < used; i += 2) {
+            const int end = LV_MIN(crossings[i], ROAD_BITMAP_PX);
+            for (int x = LV_MAX(crossings[i - 1], 0); x < end; ++x) row[x] = color;
+        }
     }
 }
 
@@ -208,6 +248,13 @@ static void draw_cache_batch(const map_cache_t *back)
         if (s_build_point >= count) {
             ++s_build_road;
             s_build_point = 1;
+            continue;
+        }
+        if (road && road->road_class == ROAD_CLASS_BUILDING) {
+            fill_building(back, road);
+            ++s_build_road;
+            s_build_point = 1;
+            budget -= count;
             continue;
         }
         lv_draw_line_dsc_t line;
@@ -367,7 +414,7 @@ static void create_position_marker(void)
         s_marker_lines[i] = lv_line_create(s_map_clip);
         lv_obj_set_size(s_marker_lines[i], MAP_DIAMETER_PX, MAP_DIAMETER_PX);
         lv_obj_center(s_marker_lines[i]);
-        lv_obj_set_style_line_color(s_marker_lines[i], lv_color_white(), 0);
+        lv_obj_set_style_line_color(s_marker_lines[i], lv_color_hex(POSITION_RGB), 0);
         lv_obj_set_style_line_width(s_marker_lines[i], 2, 0);
         lv_obj_set_style_line_rounded(s_marker_lines[i], true, 0);
         lv_obj_clear_flag(s_marker_lines[i], LV_OBJ_FLAG_CLICKABLE);
@@ -740,7 +787,7 @@ void nav_ui_apply_map_event(const roundnav_event_t *event)
         s_pending_route_count = 0;
     } else if (event->type == ROUNDNAV_EVENT_MAP_POINT) {
         const int index = event->index;
-        if (index >= 0 && index < s_pending_route_expected && index == s_pending_route_count) {
+        if (event->traffic <= 3 && index >= 0 && index < s_pending_route_expected && index == s_pending_route_count) {
             s_pending_route[index] = (geo_point_t){ .lat = event->lat_e6, .lon = event->lon_e6 };
             s_pending_traffic[index] = event->traffic;
             ++s_pending_route_count;
@@ -762,7 +809,10 @@ void nav_ui_apply_map_event(const roundnav_event_t *event)
                 render_route();
                 raise_map_overlays();
             }
-            ESP_LOGI(TAG, "Route committed: points=%d", s_route_count);
+            int traffic[4] = {0};
+            for (int i = 0; i < s_route_count - 1; ++i) ++traffic[s_route_traffic[i]];
+            ESP_LOGI(TAG, "Route committed: points=%d traffic clear=%d slow=%d busy=%d unknown=%d",
+                     s_route_count, traffic[1], traffic[2], traffic[3], traffic[0]);
         } else {
             ESP_LOGW(TAG, "Incomplete/invalid route; keeping previous route");
         }
@@ -796,10 +846,14 @@ void nav_ui_apply_road_event(const roundnav_event_t *event)
         }
         if (event->type == ROUNDNAV_EVENT_ROAD_SNAPSHOT_END) {
             int active_roads = 0;
+            int buildings = 0;
             for (int r = 0; r < ROAD_MAX_COUNT; ++r) {
-                if (s_road_store.roads[r].active) active_roads++;
+                const road_t *road = &s_road_store.roads[r];
+                if (!road->active) continue;
+                if (road->road_class == ROAD_CLASS_BUILDING) buildings++;
+                else active_roads++;
             }
-            ESP_LOGI(TAG, "Road snapshot committed: roads=%d", active_roads);
+            ESP_LOGI(TAG, "Road snapshot committed: roads=%d buildings=%d", active_roads, buildings);
         }
     }
     ui_unlock();

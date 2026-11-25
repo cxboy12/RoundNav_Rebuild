@@ -75,7 +75,7 @@ static int parse_line(char *line)
     const int road_fields = sscanf(line, " RB , %d , %d , %d , %d", &a, &b, &c, &d);
     if (road_fields >= 3 && toupper((unsigned char)line[0]) == 'R' && toupper((unsigned char)line[1]) == 'B') {
         if (a < 0 || a >= 40 || b < 2 || b > 80 || c < 0 || c > 4) return -1;
-        if (road_fields == 4 && (c != 4 || d != 1)) return -1;
+        if (road_fields == 4 && (c != 4 || d != 1 || b < 4 || b > BUILDING_MAX_POINTS)) return -1;
         ev.type = ROUNDNAV_EVENT_ROAD_BEGIN; ev.road_id = a; ev.count = b;
         ev.road_class = road_fields == 4 ? ROAD_CLASS_BUILDING : c;
         return post_event(&ev) ? 0 : -1;
