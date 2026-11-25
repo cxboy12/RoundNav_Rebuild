@@ -4,7 +4,6 @@ import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
-import java.net.URL
 
 internal object RoadApi {
     private const val TAG = "RoundNavRoadApi"
@@ -16,22 +15,27 @@ internal object RoadApi {
         callback: (List<NearbyRoad>, Throwable?) -> Unit
     ) {
         Thread {
+            if (BuildConfig.VIETMAP_ROADS_URL.isBlank()) {
+                val roads = VietmapViewportRoads.nearby(latitude, longitude, radiusMeters)
+                callback(roads, if (roads.isEmpty()) IllegalStateException("请打开 Vietmap 地图并显示当前位置附近道路") else null)
+                return@Thread
+            }
             var connection: HttpURLConnection? = null
             try {
-                val url = URL(
-                    "${BuildConfig.ROUNDNAV_BASE_URL}/ningbo/nearby-roads" +
-                        "?lat=$latitude&lon=$longitude&radius=$radiusMeters"
+                val url = VietnamMapConfig.serviceUrl(
+                    BuildConfig.VIETMAP_ROADS_URL, "周边道路接口",
+                    "lat" to latitude.toString(), "lon" to longitude.toString(), "radius" to radiusMeters.toString()
                 )
                 connection = (url.openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"
+                    instanceFollowRedirects = false
                     connectTimeout = 10_000
                     readTimeout = 20_000
                     setRequestProperty("Accept", "application/json")
                 }
                 val code = connection.responseCode
-                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-                val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
-                if (code !in 200..299) error("Nearby roads HTTP $code: $body")
+                if (code !in 200..299) error("Vietmap 周边道路接口 HTTP $code")
+                val body = connection.inputStream.bufferedReader().use { it.readText() }
                 val root = JSONObject(body)
                 check(root.has("roads") || root.has("features")) { "道路接口缺少 roads/features 字段" }
                 val roads = parseRoads(root)

@@ -1,9 +1,7 @@
 package com.example.roundnav
 
-import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
-import java.net.URL
 import kotlin.math.roundToInt
 
 internal data class RouteResult(
@@ -13,7 +11,7 @@ internal data class RouteResult(
     val turns: List<RouteTurn> = emptyList()
 )
 
-/** Basic Valhalla motorcycle route request. The server's /ningbo/route endpoint must proxy Valhalla's native JSON API. */
+/** The configured server proxies Vietmap Route v4 and owns the Services key. */
 internal object RouteApi {
     fun fetchMotorcycleRoute(
         fromLat: Double, fromLon: Double,
@@ -23,25 +21,16 @@ internal object RouteApi {
         Thread {
             var connection: HttpURLConnection? = null
             try {
-                val request = JSONObject().apply {
-                    put("locations", JSONArray().put(
-                        JSONObject().put("lat", fromLat).put("lon", fromLon).put("type", "break")
-                    ).put(
-                        JSONObject().put("lat", toLat).put("lon", toLon).put("type", "break")
-                    ))
-                    put("costing", "motorcycle")
-                    put("units", "kilometers")
-                    put("shape_format", "polyline6")
-                }
-                connection = (URL("${BuildConfig.ROUNDNAV_BASE_URL}/ningbo/route").openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
+                val url = VietnamMapConfig.serviceUrl(
+                    BuildConfig.VIETMAP_ROUTE_URL, "路线接口",
+                    "point" to "$fromLat,$fromLon", "point" to "$toLat,$toLon"
+                )
+                connection = (url.openConnection() as HttpURLConnection).apply {
+                    instanceFollowRedirects = false
                     connectTimeout = 15_000
                     readTimeout = 30_000
-                    doOutput = true
-                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
                     setRequestProperty("Accept", "application/json")
                 }
-                connection.outputStream.use { it.write(request.toString().toByteArray(Charsets.UTF_8)) }
                 val code = connection.responseCode
                 val stream = if (code in 200..299) connection.inputStream else connection.errorStream
                 if (code !in 200..299) {
@@ -60,56 +49,34 @@ internal object RouteApi {
 
     fun parseResponse(body: String): RouteResult {
         val json = JSONObject(body)
-        val trip = json.optJSONObject("trip")
-        val legs = trip?.optJSONArray("legs") ?: json.optJSONArray("trip")
-        val direct = json.optJSONArray("coordinates")
-        val turns = mutableListOf<RouteTurn>()
-        val coordinates = when {
-            direct != null -> List(direct.length()) { index ->
-                val point = direct.getJSONArray(index)
-                point.optDouble(0) to point.optDouble(1)
-            }
-            legs != null -> buildList {
-                for (index in 0 until legs.length()) {
-                    val leg = legs.getJSONObject(index)
-                    val points = decodePolyline6(leg.getString("shape"))
-                    val sharedEndpoint = lastOrNull() == points.first()
-                    val offset = if (sharedEndpoint) size - 1 else size
-                    addAll(if (sharedEndpoint) points.drop(1) else points)
-                    val maneuvers = leg.optJSONArray("maneuvers") ?: continue
-                    for (i in 0 until maneuvers.length()) {
-                        val maneuver = maneuvers.optJSONObject(i) ?: continue
-                        val shapeIndex = maneuver.optInt("begin_shape_index", -1)
-                        if (shapeIndex !in points.indices) continue
-                        // Valhalla maneuver types for slight, normal and sharp turns, and U-turns.
-                        val direction = when (maneuver.optInt("type")) {
-                            in 9..11 -> TurnDirection.RIGHT
-                            12, 13 -> TurnDirection.U_TURN
-                            in 14..16 -> TurnDirection.LEFT
-                            else -> continue
-                        }
-                        turns.add(RouteTurn(offset + shapeIndex, direction))
-                    }
-                }
-            }
-            else -> emptyList()
-        }
+        check(json.optString("code") == "OK") { "Vietmap 未返回可用路线" }
+        val path = json.optJSONArray("paths")?.optJSONObject(0) ?: error("Vietmap 未返回可用路线")
+        val coordinates = decodePolyline5(path.getString("points"))
         require(coordinates.size >= 2 && coordinates.all { (lon, lat) ->
             lat in -90.0..90.0 && lon in -180.0..180.0
-        }) { "路线接口未返回有效坐标" }
-        val summary = trip?.optJSONObject("summary") ?: json.optJSONObject("summary")
-        val length = summary?.nonNegative("length")
-        val distanceKm = when (trip?.optString("units", "kilometers") ?: json.optString("units", "kilometers")) {
-            "kilometers" -> length
-            "miles" -> length?.times(1.609344)
-            else -> null
+        }) { "Vietmap 路线坐标无效" }
+        val instructions = path.optJSONArray("instructions")
+        val turns = buildList {
+            if (instructions == null) return@buildList
+            for (index in 0 until instructions.length()) {
+                val instruction = instructions.optJSONObject(index) ?: continue
+                val start = instruction.optJSONArray("interval")?.optInt(0, -1) ?: continue
+                if (start !in 1 until coordinates.lastIndex) continue
+                val direction = when (instruction.optInt("sign")) {
+                    in -3..-1 -> TurnDirection.LEFT
+                    in 1..3 -> TurnDirection.RIGHT
+                    else -> continue
+                }
+                add(RouteTurn(start, direction))
+            }
         }
-        return RouteResult(coordinates, distanceKm, summary?.nonNegative("time"), turns)
+        return RouteResult(coordinates, path.nonNegative("distance")?.div(1000),
+            path.nonNegative("time")?.div(1000), turns)
     }
 
     private fun JSONObject.nonNegative(key: String) = optDouble(key).takeIf { it.isFinite() && it >= 0 }
 
-    private fun decodePolyline6(encoded: String): List<Pair<Double, Double>> {
+    private fun decodePolyline5(encoded: String): List<Pair<Double, Double>> {
         require(encoded.isNotEmpty()) { "路线形状为空" }
         val points = mutableListOf<Pair<Double, Double>>()
         var index = 0
@@ -125,12 +92,12 @@ internal object RouteApi {
                 if (value < 32) return if (result and 1 == 0) result shr 1 else (result shr 1).inv()
                 shift += 5
             }
-            error("路线 polyline6 数据不完整或格式无效")
+            error("路线 polyline5 数据不完整或格式无效")
         }
         while (index < encoded.length) {
             lat += readDelta()
             lon += readDelta()
-            points.add((lon / 1_000_000.0) to (lat / 1_000_000.0))
+            points.add((lon / 100_000.0) to (lat / 100_000.0))
         }
         return points
     }

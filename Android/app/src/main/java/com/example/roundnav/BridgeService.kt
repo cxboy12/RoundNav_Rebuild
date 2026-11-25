@@ -55,8 +55,6 @@ class BridgeService : Service() {
         private const val EXTRA_PLAYBACK_TURNS = "playbackTurns"
         private const val EXTRA_PLAYBACK_SPEED = "playbackSpeed"
         internal const val ROUTE_QUEUED = 1
-        internal const val NINGBO_TEST_LAT = 29.8683
-        internal const val NINGBO_TEST_LON = 121.5440
         const val EXTRA_LINE = "line"
         const val EXTRA_LINES = "lines"
         @Volatile var latestLocation: Location? = null
@@ -169,9 +167,9 @@ class BridgeService : Service() {
             if (!running) return
             if (mapMode == MapMode.SIMULATION && txCharacteristic != null) {
                 simulationStep++
-                testMapLocation = Location("ningbo-simulation").apply {
-                    latitude = NINGBO_TEST_LAT + RoadMap.simulationOffsetMeters(simulationStep) / 111_319.49
-                    longitude = NINGBO_TEST_LON
+                testMapLocation = Location("vietnam-simulation").apply {
+                    latitude = VietnamMapConfig.TEST_LAT + RoadMap.simulationOffsetMeters(simulationStep) / 111_319.49
+                    longitude = VietnamMapConfig.TEST_LON
                 }
                 lastBearing = RoadMap.simulationBearing(simulationStep)
                 queueGps(testMapLocation!!)
@@ -356,15 +354,15 @@ class BridgeService : Service() {
             }
             ACTION_SIMULATE -> {
                 simulationStep = 0
-                switchMapLocation(Location("ningbo-simulation").apply {
-                    latitude = NINGBO_TEST_LAT
-                    longitude = NINGBO_TEST_LON
+                switchMapLocation(Location("vietnam-simulation").apply {
+                    latitude = VietnamMapConfig.TEST_LAT
+                    longitude = VietnamMapConfig.TEST_LON
                 }, MapMode.SIMULATION)
             }
             ACTION_TEST_ROADS -> {
-                val point = Location("ningbo-test").apply {
-                    latitude = NINGBO_TEST_LAT
-                    longitude = NINGBO_TEST_LON
+                val point = Location("vietnam-test").apply {
+                    latitude = VietnamMapConfig.TEST_LAT
+                    longitude = VietnamMapConfig.TEST_LON
                 }
                 switchMapLocation(point)
             }
@@ -470,9 +468,9 @@ class BridgeService : Service() {
         }
         if (indoor) {
             if (mapMode != MapMode.FIXED) {
-                switchMapLocation(Location("ningbo-test").apply {
-                    latitude = NINGBO_TEST_LAT
-                    longitude = NINGBO_TEST_LON
+                switchMapLocation(Location("vietnam-test").apply {
+                    latitude = VietnamMapConfig.TEST_LAT
+                    longitude = VietnamMapConfig.TEST_LON
                 })
             } else {
                 testMapLocation?.let(::queueGps)
@@ -514,9 +512,9 @@ class BridgeService : Service() {
             failPlayback(id, "起点和终点重合，请选择其他目的地")
             return
         }
-        switchMapLocation(Location("ningbo-route-origin").apply {
-            latitude = NINGBO_TEST_LAT
-            longitude = NINGBO_TEST_LON
+        switchMapLocation(Location("vietnam-route-origin").apply {
+            latitude = VietnamMapConfig.TEST_LAT
+            longitude = VietnamMapConfig.TEST_LON
         }, MapMode.ROUTE_PLAYBACK)
         if (txCharacteristic == null) {
             failPlayback(id, "蓝牙已断开，连接就绪后可从起点重播")
@@ -571,7 +569,7 @@ class BridgeService : Service() {
 
     private fun publishPlayback(active: Playback, phase: PlaybackPhase) {
         val point = active.path.pointAt(active.traveled)
-        val location = Location("ningbo-route-playback").apply {
+        val location = Location("vietnam-route-playback").apply {
             latitude = point.latitude
             longitude = point.longitude
         }
@@ -825,7 +823,7 @@ class BridgeService : Service() {
         lastRoadWaitReason = null
         val testMode = testMapLocation != null
         val requestMode = mapMode
-        Log.i(TAG, "ROAD REQUEST mode=${if (testMode) "ningbo-test" else "live"} radius=${RoadMap.DOWNLOAD_RADIUS_M}")
+        Log.i(TAG, "ROAD REQUEST mode=${if (testMode) "vietnam-test" else "live"} radius=${RoadMap.DOWNLOAD_RADIUS_M}")
         RoadApi.fetchNearby(origin.latitude, origin.longitude, RoadMap.DOWNLOAD_RADIUS_M) { roads, error ->
             handler.post {
                 if (!running || generation != requestGeneration) return@post
@@ -854,7 +852,7 @@ class BridgeService : Service() {
                         val modeLabel = when (requestMode) {
                             MapMode.SIMULATION -> "模拟移动（非当前位置）"
                             MapMode.ROUTE_PLAYBACK -> "沿线模拟"
-                            MapMode.FIXED -> "宁波固定点（非当前位置）"
+                            MapMode.FIXED -> "胡志明市固定点（非当前位置）"
                             MapMode.COARSE -> "粗略预览（位置可能偏差）"
                             MapMode.LIVE -> "实时地图"
                         }

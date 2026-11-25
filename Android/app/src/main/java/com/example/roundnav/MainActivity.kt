@@ -1,5 +1,7 @@
 package com.example.roundnav
 
+import kotlin.math.roundToInt
+
 import android.Manifest
 import androidx.activity.ComponentActivity
 import android.content.Intent
@@ -78,8 +80,10 @@ class MainActivity : ComponentActivity() {
             BridgeService.sendCommand(this, "L,140,0")
             status.text = "已加入发送队列：L,140,0"
         }
-        addButton(content, "发送 GPS 测试点（成都天府广场附近）") {
-            BridgeService.sendCommand(this, "G,30659500,104065700,90")
+        addButton(content, "发送 GPS 测试点（胡志明市）") {
+            val lat = (VietnamMapConfig.TEST_LAT * 1e6).roundToInt()
+            val lon = (VietnamMapConfig.TEST_LON * 1e6).roundToInt()
+            BridgeService.sendCommand(this, "G,$lat,$lon,90")
             status.text = "已加入测试 GPS 命令队列"
         }
         addButton(content, "手动刷新附近道路（自动跟随已启用）") {
@@ -92,20 +96,20 @@ class MainActivity : ComponentActivity() {
             ContextCompat.startForegroundService(this, i)
             status.text = "已请求刷新；实际进度见上方道路状态"
         }
-        addButton(content, "宁波固定坐标测试道路（非实时，启动按钮恢复）") {
+        addButton(content, "胡志明市固定坐标测试道路（非实时，启动按钮恢复）") {
             if (!hasRequiredPermissions()) {
                 requestNeededPermissions()
                 return@addButton
             }
             ContextCompat.startForegroundService(this, Intent(this, BridgeService::class.java)
                 .setAction(BridgeService.ACTION_TEST_ROADS))
-            status.text = "测试位置：宁波 29.8683, 121.5440；用于验证下载与圆屏显示，点启动恢复真实定位。"
+            status.text = "测试位置：胡志明市 10.77689, 106.70089；用于验证下载与圆屏显示，点启动恢复真实定位。"
         }
         addButton(content, "室内模拟移动（自动往返，测试地图跟随）") {
             if (!hasRequiredPermissions()) { requestNeededPermissions(); return@addButton }
             ContextCompat.startForegroundService(this, Intent(this, BridgeService::class.java)
                 .setAction(BridgeService.ACTION_SIMULATE))
-            status.text = "宁波模拟点以5米/秒往返，观察道路平移和自动补图；点启动恢复真实定位。"
+            status.text = "胡志明市模拟点以5米/秒往返，观察道路平移和自动补图；点启动恢复真实定位。"
         }
         addButton(content, "室内粗略位置预览（允许≤1000米，位置可能偏差）") {
             if (!hasRequiredPermissions()) { requestNeededPermissions(); return@addButton }
@@ -115,13 +119,13 @@ class MainActivity : ComponentActivity() {
         }
         val savedDestination = DestinationStore.load(this)
         destLat = EditText(this).apply {
-            hint = "目的地纬度（例如 30.662）"
-            setText(savedInstanceState?.getString("destinationLat") ?: savedDestination?.latitude?.toString() ?: "29.875")
+            hint = "目的地纬度（例如 ${VietnamMapConfig.DESTINATION_LAT}）"
+            setText(savedInstanceState?.getString("destinationLat") ?: savedDestination?.latitude?.toString() ?: VietnamMapConfig.DESTINATION_LAT.toString())
             inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
         }
         destLon = EditText(this).apply {
-            hint = "目的地经度（例如 104.075）"
-            setText(savedInstanceState?.getString("destinationLon") ?: savedDestination?.longitude?.toString() ?: "121.55")
+            hint = "目的地经度（例如 ${VietnamMapConfig.DESTINATION_LON}）"
+            setText(savedInstanceState?.getString("destinationLon") ?: savedDestination?.longitude?.toString() ?: VietnamMapConfig.DESTINATION_LON.toString())
             inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
         }
         content.addView(destLat, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))

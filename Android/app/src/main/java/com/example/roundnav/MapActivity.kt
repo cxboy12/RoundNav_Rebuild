@@ -13,9 +13,7 @@ import android.os.SystemClock
 import android.os.Handler
 import android.os.Looper
 import android.os.ResultReceiver
-import android.text.method.LinkMovementMethod
 import android.view.Gravity
-import android.view.MotionEvent
 import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
@@ -23,21 +21,31 @@ import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
-import androidx.core.text.HtmlCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import org.osmdroid.config.Configuration
-import org.osmdroid.events.MapEventsReceiver
-import org.osmdroid.tileprovider.tilesource.TileSourceFactory
-import org.osmdroid.util.GeoPoint
-import org.osmdroid.util.BoundingBox
-import org.osmdroid.views.MapView
-import org.osmdroid.views.overlay.MapEventsOverlay
-import org.osmdroid.views.overlay.Marker
-import org.osmdroid.views.overlay.Polygon
-import org.osmdroid.views.overlay.Polyline
-import org.osmdroid.tileprovider.MapTileProviderBase
-import java.io.File
+import vn.vietmap.vietmapsdk.Vietmap
+import vn.vietmap.vietmapsdk.camera.CameraUpdateFactory
+import vn.vietmap.vietmapsdk.geometry.LatLng
+import vn.vietmap.vietmapsdk.geometry.LatLngBounds
+import vn.vietmap.vietmapsdk.maps.VietMapGL
+import vn.vietmap.vietmapsdk.maps.MapView
+import vn.vietmap.vietmapsdk.maps.Style
+import vn.vietmap.vietmapsdk.module.http.HttpRequestUtil
+import vn.vietmap.vietmapsdk.style.layers.CircleLayer
+import vn.vietmap.vietmapsdk.style.layers.FillLayer
+import vn.vietmap.vietmapsdk.style.layers.LineLayer
+import vn.vietmap.vietmapsdk.style.layers.PropertyFactory.*
+import vn.vietmap.vietmapsdk.style.sources.GeoJsonSource
+import vn.vietmap.vietmapsdk.style.sources.VectorSource
+import com.mapbox.geojson.Feature
+import com.mapbox.geojson.FeatureCollection
+import com.mapbox.geojson.Geometry
+import com.mapbox.geojson.LineString
+import com.mapbox.geojson.Point
+import com.mapbox.geojson.Polygon
+import okhttp3.OkHttpClient
+import java.net.InetSocketAddress
+import java.net.Proxy
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.roundToLong
@@ -49,21 +57,20 @@ class MapActivity : ComponentActivity() {
 
     private data class Preview(
         val route: RouteResult,
-        val origin: GeoPoint,
+        val origin: LatLng,
         val indoor: Boolean,
         val id: String = UUID.randomUUID().toString()
     )
 
     private lateinit var map: MapView
+    private var mapController: VietMapGL? = null
+    private var mapStyle: Style? = null
+    private var playbackPoint: LatLng? = null
+    private var roadViewport: LatLngBounds? = null
     private lateinit var locationStatus: TextView
     private lateinit var selectionStatus: TextView
     private lateinit var tileStatus: TextView
     private var confirm: Button? = null
-    private lateinit var position: Marker
-    private lateinit var destination: Marker
-    private lateinit var accuracy: Polygon
-    private lateinit var originMarker: Marker
-    private lateinit var routeLine: Polyline
     private lateinit var routeStatus: TextView
     private lateinit var sendStatus: TextView
     private lateinit var sendButton: Button
@@ -71,7 +78,6 @@ class MapActivity : ComponentActivity() {
     private lateinit var playbackButton: Button
     private lateinit var speedButton: Button
     private lateinit var playbackInfo: TextView
-    private lateinit var playbackMarker: Marker
     private var playbackSpeed = 10
     private var isSending = false
     private val playbackHandler = Handler(Looper.getMainLooper())
@@ -81,7 +87,7 @@ class MapActivity : ComponentActivity() {
             playbackHandler.postDelayed(this, 500)
         }
     }
-    private var selected: GeoPoint? = null
+    private var selected: LatLng? = null
     private var phoneLocation: Location? = null
     private var routeLocation: Location? = null
     private var routePreviewMode = false
@@ -90,20 +96,12 @@ class MapActivity : ComponentActivity() {
     private var followPhone = false
     private var keepRouteInView = false
     private var referenceView = false
-    private val tileMessages = Handler(Looper.getMainLooper()) { message ->
-        tileStatus.text = when (message.what) {
-            MapTileProviderBase.MAPTILE_SUCCESS_ID -> "长按地图选择目的地 · 蓝色为手机位置，红色为目的地"
-            MapTileProviderBase.MAPTILE_FAIL_ID -> "部分底图加载失败，请检查网络或代理后重新打开地图"
-            else -> tileStatus.text
-        }
-        true
-    }
     private val locations by lazy { getSystemService(LocationManager::class.java) }
     private val listener = object : LocationListener {
         override fun onLocationChanged(location: Location) = showLocation(location)
         override fun onProviderEnabled(provider: String) = Unit
         override fun onProviderDisabled(provider: String) {
-            locationStatus.text = "定位服务已关闭，可使用宁波室内参考点"
+            locationStatus.text = "定位服务已关闭，可使用胡志明市室内参考点"
         }
     }
     private val permission = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -115,11 +113,11 @@ class MapActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         routePreviewMode = intent.getBooleanExtra(EXTRA_ROUTE_PREVIEW, false)
         playbackSpeed = savedInstanceState?.getInt("playbackSpeed", 10) ?: 10
-        Configuration.getInstance().apply {
-            userAgentValue = "RoundNav/" + BuildConfig.VERSION_NAME + " (+https://github.com/cxboy12/RoundNav_Rebuild)"
-            osmdroidBasePath = File(filesDir, "maps")
-            osmdroidTileCache = File(filesDir, "maps/tiles")
-            expirationExtendedDuration = 7L * 24 * 60 * 60 * 1000
+        Vietmap.getInstance(this)
+        HttpRequestUtil.setPrintRequestUrlOnFailure(false)
+        if (BuildConfig.VIETMAP_USB_TILE_PROXY) {
+            HttpRequestUtil.setOkHttpClient(OkHttpClient.Builder()
+                .proxy(Proxy(Proxy.Type.HTTP, InetSocketAddress("127.0.0.1", 8765))).build())
         }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -140,7 +138,7 @@ class MapActivity : ComponentActivity() {
             setTextColor(Color.BLACK)
         }, LinearLayout.LayoutParams(0, -1, 1f))
         root.addView(toolbar)
-        locationStatus = TextView(this).apply { text = "当前显示宁波参考区域，等待手机定位"; textSize = 14f }
+        locationStatus = TextView(this).apply { text = "当前显示胡志明市参考区域，等待手机定位"; textSize = 14f }
         root.addView(locationStatus)
         tileStatus = TextView(this).apply { text = "底图加载中…"; textSize = 13f }
         root.addView(tileStatus)
@@ -157,99 +155,67 @@ class MapActivity : ComponentActivity() {
                     val current = phoneLocation
                     if (current != null && isRecent(current)) showLocation(current)
                     else {
-                        locationStatus.text = "正在等待手机定位，可使用宁波室内参考点"
+                        locationStatus.text = "正在等待手机定位，可使用胡志明市室内参考点"
                         startLocations()
                     }
                 }
             }
         }, LinearLayout.LayoutParams(0, -2, 1f))
         controls.addView(Button(this).apply {
-            text = "宁波室内参考点"
+            text = "胡志明市室内参考点"
             setOnClickListener {
                 followPhone = false
                 keepRouteInView = false
                 referenceView = true
-                map.controller.setZoom(16.0)
-                map.controller.animateTo(ningboOrigin())
-                locationStatus.text = "宁波室内参考点 · 非手机位置"
+                mapController?.animateCamera(CameraUpdateFactory.newLatLngZoom(testOrigin(), 16.0))
+                locationStatus.text = "胡志明市室内参考点 · 非手机位置"
             }
         }, LinearLayout.LayoutParams(0, -2, 1f))
         root.addView(controls)
-        map = MapView(this).apply {
-            setTileSource(TileSourceFactory.MAPNIK)
-            setMultiTouchControls(true)
-            minZoomLevel = 3.0
-            maxZoomLevel = 19.0
-            controller.setZoom(savedInstanceState?.getDouble("zoom") ?: 16.0)
-            controller.setCenter(GeoPoint(
-                savedInstanceState?.getDouble("centerLat") ?: BridgeService.NINGBO_TEST_LAT,
-                savedInstanceState?.getDouble("centerLon") ?: BridgeService.NINGBO_TEST_LON
-            ))
-            setOnTouchListener { _, event ->
-                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+        map = MapView(this)
+        map.onCreate(savedInstanceState)
+        map.addOnDidFailLoadingMapListener {
+            tileStatus.text = "Vietmap 底图加载失败，请检查网络和 Tilemap 授权"
+        }
+        map.addOnDidBecomeIdleListener { publishViewportRoads() }
+        map.getMapAsync { controller ->
+            mapController = controller
+            controller.setMinZoomPreference(3.0)
+            controller.setMaxZoomPreference(19.0)
+            controller.setPrefetchZoomDelta(0)
+            val savedCenter = LatLng(
+                savedInstanceState?.getDouble("centerLat") ?: VietnamMapConfig.TEST_LAT,
+                savedInstanceState?.getDouble("centerLon") ?: VietnamMapConfig.TEST_LON
+            )
+            val center = if (followPhone) phoneLocation?.let { LatLng(it.latitude, it.longitude) } ?: savedCenter
+                else savedCenter
+            controller.moveCamera(CameraUpdateFactory.newLatLngZoom(center, savedInstanceState?.getDouble("zoom") ?: 16.0))
+            controller.addOnCameraMoveStartedListener { reason ->
+                if (reason == VietMapGL.OnCameraMoveStartedListener.REASON_API_GESTURE) {
                     followPhone = false
                     keepRouteInView = false
                 }
-                false
+            }
+            controller.addOnMapLongClickListener { point -> select(point); true }
+            val styleUrl = VietnamMapConfig.streetStyleUrl()
+            if (styleUrl == null) {
+                tileStatus.text = "未配置 Vietmap Tilemap Key"
+            } else {
+                controller.setStyle(Style.Builder().fromUri(styleUrl)) { style ->
+                    installOverlays(style)
+                    mapStyle = style
+                    updateOverlays()
+                    tileStatus.text = "长按地图选择目的地 · 蓝色为手机位置，红色为目的地"
+                    fitVisibleRoute()
+                }
             }
         }
         map.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
             if (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop) fitVisibleRoute()
         }
-        map.overlays.add(MapEventsOverlay(object : MapEventsReceiver {
-            override fun singleTapConfirmedHelper(p: GeoPoint) = false
-            override fun longPressHelper(p: GeoPoint): Boolean { select(p); return true }
-        }))
-        map.tileProvider.tileRequestCompleteHandlers.add(tileMessages)
-        accuracy = Polygon(map).apply {
-            fillPaint.color = 0x223588D9
-            outlinePaint.color = 0x663588D9
-            outlinePaint.strokeWidth = dp(1).toFloat()
-        }
-        map.overlays.add(accuracy)
-        if (routePreviewMode) {
-            routeLine = Polyline(map).apply {
-                outlinePaint.color = Color.rgb(105, 55, 196)
-                outlinePaint.strokeWidth = dp(5).toFloat()
-                isEnabled = false
-            }
-            map.overlays.add(routeLine)
-            originMarker = Marker(map).apply {
-                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                icon = getDrawable(android.R.drawable.ic_menu_mylocation)?.mutate()
-                    ?.apply { setTint(Color.rgb(28, 128, 82)) }
-                isEnabled = false
-            }
-            map.overlays.add(originMarker)
-        }
-        position = Marker(map).apply {
-            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-            isEnabled = false
-            title = "手机位置"
-            icon = getDrawable(android.R.drawable.ic_menu_mylocation)?.mutate()?.apply { setTint(Color.rgb(35, 113, 200)) }
-        }
-        destination = Marker(map).apply {
-            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-            isEnabled = false
-            title = "目的地"
-            icon = getDrawable(android.R.drawable.ic_menu_mylocation)?.mutate()?.apply { setTint(Color.rgb(204, 55, 45)) }
-        }
-        map.overlays.add(position)
-        map.overlays.add(destination)
-        if (routePreviewMode) {
-            playbackMarker = Marker(map).apply {
-                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                title = "室内模拟位置"
-                icon = getDrawable(android.R.drawable.ic_menu_mylocation)?.mutate()
-                    ?.apply { setTint(Color.rgb(226, 112, 0)) }
-                isEnabled = false
-            }
-            map.overlays.add(playbackMarker)
-        }
         root.addView(map, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(TextView(this).apply {
-            text = HtmlCompat.fromHtml("© <a href=\"https://www.openstreetmap.org/copyright\">OpenStreetMap contributors</a>", HtmlCompat.FROM_HTML_MODE_LEGACY)
-            movementMethod = LinkMovementMethod.getInstance()
+            text = "© VIETMAP"
             gravity = Gravity.END
         })
         selectionStatus = TextView(this).apply { text = "长按地图选择目的地"; textSize = 16f }
@@ -274,14 +240,14 @@ class MapActivity : ComponentActivity() {
         setContentView(root)
         val saved = DestinationStore.load(this)
         if (savedInstanceState?.containsKey("selectedLat") == true) {
-            select(GeoPoint(savedInstanceState.getDouble("selectedLat"), savedInstanceState.getDouble("selectedLon")))
+            select(LatLng(savedInstanceState.getDouble("selectedLat"), savedInstanceState.getDouble("selectedLon")))
         } else if (routePreviewMode) {
-            select(GeoPoint(intent.getDoubleExtra("latitude", 29.875), intent.getDoubleExtra("longitude", 121.55)))
-        } else if (saved != null) select(GeoPoint(saved.latitude, saved.longitude))
+            select(LatLng(intent.getDoubleExtra("latitude", VietnamMapConfig.DESTINATION_LAT), intent.getDoubleExtra("longitude", VietnamMapConfig.DESTINATION_LON)))
+        } else if (saved != null) select(LatLng(saved.latitude, saved.longitude))
         followPhone = savedInstanceState?.getBoolean("followPhone") ?: !routePreviewMode
         keepRouteInView = savedInstanceState?.getBoolean("keepRouteInView") ?: false
         referenceView = savedInstanceState?.getBoolean("referenceView") ?: false
-        if (referenceView) locationStatus.text = "宁波室内参考点 · 非手机位置"
+        if (referenceView) locationStatus.text = "胡志明市室内参考点 · 非手机位置"
         savedInstanceState?.getDoubleArray("routeCoordinates")?.let { coordinates ->
             val route = RouteResult(
                 coordinates.toList().chunked(2).map { (lon, lat) -> lon to lat },
@@ -289,20 +255,18 @@ class MapActivity : ComponentActivity() {
                 savedInstanceState.getDouble("routeDuration", Double.NaN).takeIf { it.isFinite() },
                 RouteTurn.decode(savedInstanceState.getIntArray("routeTurns"))
             )
-            val origin = GeoPoint(savedInstanceState.getDouble("routeOriginLat"), savedInstanceState.getDouble("routeOriginLon"))
+            val origin = LatLng(savedInstanceState.getDouble("routeOriginLat"), savedInstanceState.getDouble("routeOriginLon"))
             showPreview(Preview(route, origin, savedInstanceState.getBoolean("routeIndoor"),
                 savedInstanceState.getString("previewId") ?: UUID.randomUUID().toString()), fit = false)
         }
     }
 
-    private fun select(point: GeoPoint) {
-        selected = GeoPoint(point.latitude, point.longitude)
-        destination.position = selected
-        destination.isEnabled = true
+    private fun select(point: LatLng) {
+        selected = LatLng(point.latitude, point.longitude)
         selectionStatus.text = String.format(Locale.CHINA, "目的地  %.6f, %.6f", point.latitude, point.longitude)
         confirm?.isEnabled = true
         if (routePreviewMode) clearPreview("请选择路线起点")
-        map.invalidate()
+        updateOverlays()
     }
 
     private fun addRouteControls(root: LinearLayout) {
@@ -312,7 +276,7 @@ class MapActivity : ComponentActivity() {
             setOnClickListener { planRoute(indoor = false) }
         }, LinearLayout.LayoutParams(0, -2, 1f))
         starts.addView(Button(this).apply {
-            text = "从宁波测试点规划"
+            text = "从胡志明市测试点规划"
             setOnClickListener { planRoute(indoor = true) }
         }, LinearLayout.LayoutParams(0, -2, 1f))
         root.addView(starts)
@@ -346,7 +310,7 @@ class MapActivity : ComponentActivity() {
         root.addView(playbackControls)
     }
 
-    private fun ningboOrigin() = GeoPoint(BridgeService.NINGBO_TEST_LAT, BridgeService.NINGBO_TEST_LON)
+    private fun testOrigin() = LatLng(VietnamMapConfig.TEST_LAT, VietnamMapConfig.TEST_LON)
 
     private fun clearPreview(message: String) {
         requestId++
@@ -354,20 +318,18 @@ class MapActivity : ComponentActivity() {
         preview = null
         keepRouteInView = false
         isSending = false
-        originMarker.isEnabled = false
-        routeLine.isEnabled = false
         sendButton.isEnabled = false
         routeStatus.text = message
         sendStatus.text = ""
         showPlayback()
-        map.invalidate()
+        updateOverlays()
     }
 
     private fun planRoute(indoor: Boolean) {
         val target = selected ?: return
-        val source = if (indoor) "宁波固定测试起点 · 非实时" else "真实手机定位起点"
+        val source = if (indoor) "胡志明市固定测试起点 · 非实时" else "真实手机定位起点"
         clearPreview("$source · 正在规划…")
-        val origin = if (indoor) ningboOrigin() else {
+        val origin = if (indoor) testOrigin() else {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
                 permission.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
                 routeStatus.text = "真实起点需要精确定位权限，授权后请重新规划"
@@ -379,7 +341,7 @@ class MapActivity : ComponentActivity() {
                 startLocations()
                 return
             }
-            GeoPoint(fix.latitude, fix.longitude)
+            LatLng(fix.latitude, fix.longitude)
         }
         followPhone = false
         val request = requestId
@@ -394,36 +356,29 @@ class MapActivity : ComponentActivity() {
 
     private fun showPreview(value: Preview, fit: Boolean) {
         preview = value
-        val points = value.route.coordinates.map { (lon, lat) -> GeoPoint(lat, lon) }
-        routeLine.setPoints(points)
-        routeLine.isEnabled = true
-        originMarker.position = value.origin
-        originMarker.title = if (value.indoor) "宁波固定测试起点 · 非实时" else "真实手机定位起点"
-        originMarker.isEnabled = true
+        val originLabel = if (value.indoor) "胡志明市固定测试起点 · 非实时" else "真实手机定位起点"
         val distance = value.route.distanceKm?.let { String.format(Locale.CHINA, "%.2f 公里", it) } ?: "距离未知"
         val duration = value.route.durationSeconds?.roundToLong()?.let {
             "预计 ${it / 60} 分 ${it % 60} 秒"
         } ?: "时间未知"
         routeStatus.text = String.format(Locale.CHINA, "%s  %.6f, %.6f\n%s · %s",
-            originMarker.title, value.origin.latitude, value.origin.longitude, distance, duration)
+            originLabel, value.origin.latitude, value.origin.longitude, distance, duration)
         showPlayback()
         if (fit) {
             followPhone = false
             keepRouteInView = true
             map.post { fitVisibleRoute() }
         }
-        map.invalidate()
+        updateOverlays()
     }
 
     private fun fitVisibleRoute() {
         val value = preview?.takeIf { keepRouteInView } ?: return
         val padding = dp(28)
         if (map.height <= 2 * padding || map.width <= 2 * padding) return
-        val points = value.route.coordinates.map { (lon, lat) -> GeoPoint(lat, lon) }
-        val bounds = BoundingBox.fromGeoPoints(points + value.origin + listOfNotNull(selected))
-        if (bounds.latitudeSpan == 0.0) bounds.latSouth = (bounds.latSouth - 0.0001).coerceAtLeast(-90.0)
-        if (bounds.longitudeSpanWithDateLine == 0.0) bounds.lonWest = (bounds.lonWest - 0.0001).coerceAtLeast(-180.0)
-        map.zoomToBoundingBox(bounds, false, padding)
+        val points = value.route.coordinates.map { (lon, lat) -> LatLng(lat, lon) }
+        val bounds = LatLngBounds.Builder().includes(points + value.origin + listOfNotNull(selected)).build()
+        mapController?.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds, padding))
     }
 
     private fun sendPreview() {
@@ -511,16 +466,10 @@ class MapActivity : ComponentActivity() {
             listOfNotNull("$phaseText · $progress", replay.guidance?.label, BridgeService.status.roads).joinToString("\n")
         }
         if (playbackInfo.text != details) playbackInfo.text = details
-        if (point != null) {
-            val next = GeoPoint(point.latitude, point.longitude)
-            if (!playbackMarker.isEnabled || playbackMarker.position != next) {
-                playbackMarker.position = next
-                playbackMarker.isEnabled = true
-                map.invalidate()
-            }
-        } else if (playbackMarker.isEnabled) {
-            playbackMarker.isEnabled = false
-            map.invalidate()
+        val next = point?.let { LatLng(it.latitude, it.longitude) }
+        if (playbackPoint != next) {
+            playbackPoint = next
+            updateOverlays()
         }
     }
 
@@ -539,16 +488,13 @@ class MapActivity : ComponentActivity() {
         val old = phoneLocation
         if (old != null && isRecent(old) && location.elapsedRealtimeNanos < old.elapsedRealtimeNanos) return
         phoneLocation = Location(location)
-        val point = GeoPoint(location.latitude, location.longitude)
-        position.position = point
-        position.isEnabled = true
-        accuracy.points = Polygon.pointsAsCircle(point, location.accuracy.toDouble())
+        val point = LatLng(location.latitude, location.longitude)
         if (!referenceView) {
             locationStatus.text = "手机位置 · 精度约 " + location.accuracy.toInt() + " 米" +
                 if (location.accuracy > 50) " · 粗略位置" else ""
         }
-        if (followPhone) map.controller.animateTo(point)
-        map.invalidate()
+        if (followPhone) mapController?.animateCamera(CameraUpdateFactory.newLatLng(point))
+        updateOverlays()
     }
 
     @SuppressLint("MissingPermission")
@@ -563,7 +509,7 @@ class MapActivity : ComponentActivity() {
                     locations.requestLocationUpdates(provider, 1000L, 0f, listener, mainLooper)
                 }
             } catch (_: IllegalArgumentException) {
-                locationStatus.text = "部分定位服务不可用，可使用宁波室内参考点"
+                locationStatus.text = "部分定位服务不可用，可使用胡志明市室内参考点"
             } catch (_: SecurityException) {
                 locationStatus.text = "定位权限已变更，请重新授权"
             }
@@ -584,15 +530,19 @@ class MapActivity : ComponentActivity() {
     }
     override fun onDestroy() {
         if (isFinishing) endPlayback()
-        map.tileProvider.tileRequestCompleteHandlers.remove(tileMessages)
-        tileMessages.removeCallbacksAndMessages(null)
-        map.onDetach()
+        mapStyle = null
+        map.onDestroy()
         super.onDestroy()
     }
     override fun onSaveInstanceState(out: Bundle) {
-        out.putDouble("centerLat", map.mapCenter.latitude)
-        out.putDouble("centerLon", map.mapCenter.longitude)
-        out.putDouble("zoom", map.zoomLevelDouble)
+        map.onSaveInstanceState(out)
+        mapController?.cameraPosition?.let { camera ->
+            camera.target?.let { target ->
+                out.putDouble("centerLat", target.latitude)
+                out.putDouble("centerLon", target.longitude)
+            }
+            out.putDouble("zoom", camera.zoom)
+        }
         out.putBoolean("followPhone", followPhone)
         out.putBoolean("keepRouteInView", keepRouteInView)
         out.putBoolean("referenceView", referenceView)
@@ -610,5 +560,81 @@ class MapActivity : ComponentActivity() {
         }
         super.onSaveInstanceState(out)
     }
+    override fun onStart() {
+        super.onStart()
+        map.onStart()
+    }
+
+    override fun onStop() {
+        map.onStop()
+        super.onStop()
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        map.onLowMemory()
+    }
+
+    private fun installOverlays(style: Style) {
+        val empty = FeatureCollection.fromFeatures(emptyArray<Feature>())
+        for (name in listOf("accuracy", "route", "origin", "position", "destination", "playback")) {
+            style.addSource(GeoJsonSource("roundnav-$name", empty))
+        }
+        style.addLayer(FillLayer("roundnav-accuracy", "roundnav-accuracy").withProperties(
+            fillColor(Color.rgb(53, 136, 217)), fillOpacity(0.15f)
+        ))
+        style.addLayer(LineLayer("roundnav-route", "roundnav-route").withProperties(
+            lineColor(Color.rgb(105, 55, 196)), lineWidth(5f)
+        ))
+        val markerColors = mapOf("origin" to 0xFF1C8052.toInt(), "position" to 0xFF2371C8.toInt(),
+            "destination" to 0xFFCC372D.toInt(), "playback" to 0xFFE27000.toInt())
+        for ((name, color) in markerColors) {
+            style.addLayer(CircleLayer("roundnav-$name", "roundnav-$name").withProperties(
+                circleColor(color), circleRadius(7f), circleStrokeColor(Color.WHITE), circleStrokeWidth(2f)
+            ))
+        }
+    }
+
+    private fun publishViewportRoads() {
+        if (BuildConfig.VIETMAP_ROADS_URL.isNotBlank()) return
+        val controller = mapController ?: return
+        if (controller.cameraPosition.zoom < 14) return
+        val bounds = controller.projection.visibleRegion.latLngBounds
+        if (roadViewport == bounds) return
+        val source = mapStyle?.getSourceAs<VectorSource>("openmaptiles") ?: return
+        val features = source.querySourceFeatures(arrayOf("road"), null)
+        if (features.isEmpty()) return
+        VietmapViewportRoads.publish(bounds, features)
+        roadViewport = bounds
+        android.util.Log.i("RoundNavVietmap", "SDK road features loaded: ${features.size}")
+    }
+
+    private fun updateOverlays() {
+        val style = mapStyle ?: return
+        fun update(name: String, geometry: Geometry?) {
+            val features = geometry?.let { arrayOf(Feature.fromGeometry(it)) } ?: emptyArray()
+            style.getSourceAs<GeoJsonSource>("roundnav-$name")?.setGeoJson(FeatureCollection.fromFeatures(features))
+        }
+        fun LatLng.geoJson() = Point.fromLngLat(longitude, latitude)
+        val current = phoneLocation
+        val accuracyRing = current?.let { location ->
+            val latScale = 111_319.49
+            val lonScale = latScale * kotlin.math.cos(Math.toRadians(location.latitude))
+            if (lonScale < 1.0) null else (0..36).map { step ->
+                val angle = step % 36 * Math.PI / 18
+                Point.fromLngLat(location.longitude + location.accuracy * kotlin.math.sin(angle) / lonScale,
+                    location.latitude + location.accuracy * kotlin.math.cos(angle) / latScale)
+            }
+        }
+        update("accuracy", accuracyRing?.let { Polygon.fromLngLats(listOf(it)) })
+        update("position", current?.let { Point.fromLngLat(it.longitude, it.latitude) })
+        update("destination", selected?.geoJson())
+        update("origin", preview?.origin?.geoJson())
+        update("playback", playbackPoint?.geoJson())
+        update("route", preview?.route?.coordinates?.let { shape ->
+            LineString.fromLngLats(shape.map { (lon, lat) -> Point.fromLngLat(lon, lat) })
+        })
+    }
+
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 }
