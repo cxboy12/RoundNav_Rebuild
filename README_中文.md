@@ -165,9 +165,11 @@ RX:      6e400002-b5a3-f393-e0a9-e50e24dcca9e
 | 路线点 | `P,index,lat_e6,lon_e6` | 路线经纬度，单位为度×1,000,000 |
 | 路线结束 | `E` | 完成路线 |
 | 道路中心 | `RC,lat_e6,lon_e6` | 设置附近道路数据的中心 |
-| 道路开始 | `RB,road_id,count,road_class` | 开始道路，ID 0–39，点数 2–80，类别 0–4 |
+| 道路开始 | `RB,road_id,count,road_class` | 开始道路，ID 0–159，点数 2–32，类别 0–4 |
 | 道路点 | `RP,road_id,index,lat_e6,lon_e6` | 道路坐标点 |
 | 道路结束 | `RE,road_id` | 完成道路 |
+| 紧凑街道 | `RL,id,class,x0,y0,dx1,dy1,...` | 一行一段街道。坐标为相对 `RC` 的整米东/北偏移，第二个点起相对前一点；类别 0–4，6 为小巷 |
+| 紧凑建筑 | `RQ,id,x0,y0,dx1,dy1,...` | 一行一栋建筑，4–12 点，坐标规则同上 |
 | 实时 GPS | `G,lat_e6,lon_e6,bearing_deg` | 手机位置与方向角；方向角 0–359 度，正北为 0，顺时针增加 |
 
 Android `LocationManager` 提供位置；运动时优先用 GPS bearing，低速时用相邻定位点估算方向。静止时方向角会保持最近一次有效值。
