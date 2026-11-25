@@ -83,9 +83,18 @@ public final class RoadMapChecks {
             "Turn guidance begins at 500 metres and continues through the approach");
 
         List<Pair<Double, Double>> guidanceShape = new ArrayList<>();
-        for (int i = 0; i < 1200; i++) guidanceShape.add(new Pair<>(lon + i * .00001, lat));
+        // A 3 m zigzag cannot be straightened, so the capacity sampling still applies.
+        for (int i = 0; i < 1200; i++) guidanceShape.add(new Pair<>(lon + i * .00001, lat + (i % 2 == 1 ? .00003 : 0)));
         List<RouteTurn> longTurns = List.of(new RouteTurn(221, TurnDirection.LEFT), new RouteTurn(926, TurnDirection.U_TURN));
         RouteResult sampled = RouteApi.INSTANCE.displayRoute(new RouteResult(guidanceShape, null, null, longTurns));
+        List<Pair<Double, Double>> jittered = new ArrayList<>();
+        for (int i = 0; i < 1200; i++) jittered.add(new Pair<>(lon + i * .00001, lat + (i % 2 == 1 ? .0000036 : 0)));
+        RouteResult straight = RouteApi.INSTANCE.displayRoute(new RouteResult(jittered, null, null, longTurns));
+        verify(straight.getCoordinates().equals(List.of(jittered.get(0), jittered.get(221), jittered.get(926), jittered.get(1199))) &&
+            straight.getTurns().get(0).getShapeIndex() == 1 && straight.getTurns().get(1).getShapeIndex() == 2,
+            "A straight street with sub-metre jitter keeps only its endpoints and turns");
+        verify(RouteApi.INSTANCE.toBleCommands(straight).size() == 6,
+            "The round screen receives exactly the displayed vertices");
         verify(sampled.getCoordinates().size() == 500 &&
             sampled.getCoordinates().get(0).equals(guidanceShape.get(0)) &&
             sampled.getCoordinates().get(499).equals(guidanceShape.get(1199)), "BLE capacity and both endpoints survive sampling");
@@ -118,6 +127,10 @@ public final class RoadMapChecks {
         verify(simplified.size() == 80 && simplified.get(0).equals(longRoad.get(0)) &&
             simplified.get(79).equals(longRoad.get(200)), "Simplification respects capacity and endpoints");
         verify(simplified.contains(longRoad.get(100)), "Simplification preserves a sharp corner");
+        List<Pair<Double, Double>> streetJitter = new ArrayList<>();
+        for (int i = 0; i <= 200; i++) streetJitter.add(new Pair<>(lon + i * .00001, lat + (i % 3 == 0 ? .000004 : 0)));
+        verify(map.simplify(streetJitter, 24, 0.8).size() == 2, "A straight street is sent as one segment");
+        verify(map.simplify(longRoad, 24, 0.8).contains(longRoad.get(100)), "Straightening keeps real corners");
 
         List<NearbyRoad> manyRoads = new ArrayList<>();
         for (int i = 0; i < 80; i++) {

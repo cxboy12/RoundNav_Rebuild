@@ -27,6 +27,8 @@ internal object RoadMap {
     const val MAX_BUILDINGS = MAX_ENTRIES - MAX_STREET_ENTRIES
     /** Firmware stores up to 32 points per street piece; leave room for chunk overlap. */
     const val STREET_POINTS = 24
+    /** Street vertices closer than this to the simplified line are not sent. */
+    const val STREET_TOLERANCE_M = 0.8
     const val BUILDING_POINTS = 8
     const val MIN_BUILDING_AREA_M2 = 12.0
     /** 6378137 m * pi / 180 / 1e6, shared with the firmware decoder. */
@@ -96,9 +98,16 @@ internal object RoadMap {
         return roads.filter { it.points.size >= 2 }.sortedBy { distance(it.points, frame, 0.0, 0.0) }.take(40)
     }
 
-    /** Keep corners when reducing a long road to the firmware's point capacity. */
-    fun simplify(points: List<Pair<Double, Double>>, limit: Int = 80): List<Pair<Double, Double>> {
-        if (points.size <= limit) return points
+    /**
+     * Keep corners when reducing a long road to the firmware's point capacity. With a positive
+     * [toleranceMeters], vertices that lie that close to the simplified line are also dropped,
+     * so a straight street becomes one segment instead of a row of rounded, offset points.
+     */
+    @JvmOverloads
+    fun simplify(points: List<Pair<Double, Double>>, limit: Int = 80, toleranceMeters: Double = 0.0): List<Pair<Double, Double>> {
+        if (points.size <= 2 || (toleranceMeters <= 0.0 && points.size <= limit)) return points
+        val tolerance = toleranceMeters / 111_319.49
+        val tolerance2 = tolerance * tolerance
         val selected = sortedSetOf(0, points.lastIndex)
         val cs = cos(Math.toRadians(points.first().second))
         while (selected.size < limit) {
@@ -118,7 +127,7 @@ internal object RoadMap {
                     if (error > bestError) { bestError = error; bestIndex = i }
                 }
             }
-            if (bestIndex < 0) break
+            if (bestIndex < 0 || bestError <= tolerance2) break
             selected.add(bestIndex)
         }
         return selected.map { points[it] }
@@ -214,7 +223,7 @@ internal object RoadMap {
                 val roadClass = roadClass(street.type) ?: continue
                 val bonus = when (roadClass) { 0 -> 80.0; 1 -> 60.0; 2 -> 45.0; 3 -> 25.0; CLASS_SERVICE -> -30.0; else -> 0.0 }
                 for (run in clip(street.points, frame, KEEP_RADIUS_M)) {
-                    val points = simplify(run, STREET_POINTS)
+                    val points = simplify(run, STREET_POINTS, STREET_TOLERANCE_M)
                     // Split long pieces so each command fits; neighbouring chunks share a point.
                     var start = 0
                     while (start < points.lastIndex) {

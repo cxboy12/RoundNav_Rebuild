@@ -2,6 +2,8 @@ package com.example.roundnav
 
 import org.json.JSONObject
 import java.net.HttpURLConnection
+import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 internal data class RouteResult @JvmOverloads constructor(
@@ -142,24 +144,75 @@ internal object RouteApi {
         return points
     }
 
-    fun displayRoute(route: RouteResult): RouteResult {
-        val points = route.coordinates
-        val limit = 500
-        if (points.size <= limit) return route
+    /** Firmware route capacity. */
+    private const val ROUTE_POINT_LIMIT = 500
+    /** Vertices within this distance of the line through their kept neighbours are dropped. */
+    private const val STRAIGHTEN_TOLERANCE_M = 1.0
 
+    /** Douglas-Peucker between consecutive required vertices, measured in local metres. */
+    private fun straightenedIndices(points: List<Pair<Double, Double>>, required: Set<Int>, toleranceM: Double): MutableSet<Int> {
+        val eastScale = 111_319.49 * cos(Math.toRadians(points.first().second))
+        fun x(i: Int) = (points[i].first - points.first().first) * eastScale
+        fun y(i: Int) = (points[i].second - points.first().second) * 111_319.49
+        val kept = required.toSortedSet()
+        val pending = ArrayDeque(kept.toList().zipWithNext())
+        while (pending.isNotEmpty()) {
+            val (a, b) = pending.removeLast()
+            if (b - a < 2) continue
+            val ax = x(a)
+            val ay = y(a)
+            val dx = x(b) - ax
+            val dy = y(b) - ay
+            val length2 = dx * dx + dy * dy
+            var worst = -1
+            var worstDistance = toleranceM
+            for (i in a + 1 until b) {
+                val px = x(i) - ax
+                val py = y(i) - ay
+                val t = if (length2 == 0.0) 0.0 else ((px * dx + py * dy) / length2).coerceIn(0.0, 1.0)
+                val distance = hypot(px - t * dx, py - t * dy)
+                if (distance > worstDistance) { worstDistance = distance; worst = i }
+            }
+            if (worst < 0) continue
+            kept.add(worst)
+            pending.addLast(a to worst)
+            pending.addLast(worst to b)
+        }
+        return kept
+    }
+
+    /**
+     * The route shape shared by the phone preview, playback, live matching and the round screen.
+     * Route v4 describes a straight street with many slightly offset vertices; each one rounds to
+     * its own pixel on the round screen and shows as a step, so those are dropped first. Turns,
+     * endpoints and congestion boundaries are always kept. The result is then capped at the
+     * firmware capacity. [straighten] = false only applies the cap, so an already displayed
+     * route passes through unchanged and the firmware gets exactly the playback vertices.
+     */
+    @JvmOverloads
+    fun displayRoute(route: RouteResult, straighten: Boolean = true): RouteResult {
+        val points = route.coordinates
+        if (points.size <= 2) return route
+        val limit = ROUTE_POINT_LIMIT
         val endpoints = setOf(0, points.lastIndex)
-        val turnIndices = route.turns.map { it.shapeIndex }.toSet()
+        val turnIndices = route.turns.map { it.shapeIndex }.filter { it in points.indices }.toSet()
         val keepTurns = (endpoints + turnIndices).size <= limit
         val required = (if (keepTurns) endpoints + turnIndices else endpoints).toMutableSet()
         val boundaries = (1 until route.traffic.size).filter { route.traffic[it - 1] != route.traffic[it] }
         if ((required + boundaries).size <= limit) required.addAll(boundaries)
-        val candidates = points.indices.filterNot { it in required }
-        val available = limit - required.size
-        val selected = required.toMutableSet()
-        for (index in 0 until available) {
-            // Pick the midpoint of each equal-sized bucket of remaining points.
-            selected.add(candidates[((index + 0.5) * candidates.size / available).toInt()])
+
+        val selected = if (straighten) straightenedIndices(points, required, STRAIGHTEN_TOLERANCE_M)
+            else points.indices.toMutableSet()
+        if (selected.size > limit) {
+            val candidates = selected.filterNot { it in required }.sorted()
+            val available = limit - required.size
+            selected.retainAll(required)
+            for (index in 0 until available) {
+                // Pick the midpoint of each equal-sized bucket of remaining points.
+                selected.add(candidates[((index + 0.5) * candidates.size / available).toInt()])
+            }
         }
+        if (selected.size == points.size) return route
         val ordered = selected.sorted()
         return route.copy(
             coordinates = ordered.map { points[it] },
@@ -173,7 +226,8 @@ internal object RouteApi {
     }
 
     fun toBleCommands(route: RouteResult): ArrayList<String> {
-        val drawable = displayRoute(route)
+        // Callers pass the displayed route; only enforce the capacity here.
+        val drawable = displayRoute(route, straighten = false)
         val selected = drawable.coordinates
         val turns = drawable.turns.associateBy { it.shapeIndex }
         val commands = arrayListOf("B,${selected.size}")
