@@ -21,6 +21,8 @@ import androidx.core.location.LocationCompat
 import java.util.ArrayDeque
 import java.util.UUID
 import kotlin.math.max
+import kotlin.math.cos
+import kotlin.math.sin
 import kotlin.math.roundToInt
 
 internal data class BridgeStatus(
@@ -213,7 +215,8 @@ class BridgeService : Service() {
                 if (result == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
                     status = status.copy(bluetooth = "已连接，正在准备数据通道")
                     try {
-                        if (!g.requestMtu(128)) resetConnection("无法协商蓝牙数据长度，重新连接")
+                        g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                        if (!g.requestMtu(243)) resetConnection("无法协商蓝牙数据长度，重新连接")
                     } catch (_: SecurityException) { resetConnection("蓝牙权限不足") }
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED || result != BluetoothGatt.GATT_SUCCESS) {
                     resetConnection("连接已断开 ($result)，重新连接")
@@ -850,7 +853,19 @@ class BridgeService : Service() {
                     return@post
                 }
                 sendingRoads = true
-                val commands = RoadMap.commands(roads, origin.latitude, origin.longitude)
+                val replay = playback
+                val ahead = when {
+                    replay != null -> replay.path.pointAt(replay.traveled + RoadMap.LOOK_AHEAD_M)
+                        .let { it.longitude to it.latitude }
+                    origin.hasSpeed() && origin.speed >= 2f -> {
+                        val angle = Math.toRadians(lastBearing.toDouble())
+                        val metersPerDegreeLon = 111_319.49 * cos(Math.toRadians(origin.latitude))
+                        (origin.longitude + RoadMap.LOOK_AHEAD_M * sin(angle) / metersPerDegreeLon) to
+                            (origin.latitude + RoadMap.LOOK_AHEAD_M * cos(angle) / 111_319.49)
+                    }
+                    else -> null
+                }
+                val commands = RoadMap.commands(roads, origin.latitude, origin.longitude, ahead)
                 val count = commands.first().substringAfter(',').toInt()
                 status = status.copy(roads = "正在发送 $count 条道路；GPS 持续跟随")
                 if (!enqueueBatch(commands) onSent@{
@@ -864,7 +879,7 @@ class BridgeService : Service() {
                             MapMode.COARSE -> "粗略预览（位置可能偏差）"
                             MapMode.LIVE -> "实时地图"
                         }
-                        status = status.copy(roads = "$modeLabel：已发送 $count 条道路 · 移动约75米补加载")
+                        status = status.copy(roads = "$modeLabel：已发送 $count 项地图数据 · 移动约${RoadMap.REFRESH_DISTANCE_M.toInt()}米补加载")
                         Log.i(TAG, "Road snapshot sent: roads=$count commands=${commands.size}")
                         maybeFetchRoads()
                     }) {

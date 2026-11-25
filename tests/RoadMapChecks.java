@@ -31,7 +31,7 @@ public final class RoadMapChecks {
         verify(true, "Simulation stays continuous through two full loops");
         verify(map.needsRefresh(lat, lon, null, null), "First location loads roads");
         verify(!map.needsRefresh(lat + 0.0001, lon, lat, lon), "Small movements pan without fetching");
-        verify(map.needsRefresh(lat + 0.0008, lon, lat, lon), "Movement beyond 75 m fetches coverage");
+        verify(map.needsRefresh(lat + 0.00045, lon, lat, lon), "Movement beyond 45 m fetches coverage");
         verify(Math.abs(map.distanceMeters(lat, lon, lat + 0.001, lon) - 111.31949) < 0.01, "Latitude distance is in metres");
 
         double north = lat + .001;
@@ -121,18 +121,18 @@ public final class RoadMapChecks {
 
         List<NearbyRoad> manyRoads = new ArrayList<>();
         for (int i = 0; i < 50; i++) manyRoads.add(new NearbyRoad("road " + i, "primary", longRoad));
-        List<String> lines = map.commands(manyRoads, lat, lon);
-        verify(lines.get(0).equals("RS,40") && lines.get(lines.size()-1).equals("RF"), "Whole-map transaction brackets 40 roads");
-        verify(lines.stream().filter(s -> s.startsWith("RP,")).count() == 3200, "No more than 80 points per road");
+        List<String> lines = map.commands(manyRoads, lat, lon, null);
+        verify(lines.get(0).equals("RS,24") && lines.get(lines.size()-1).equals("RF"), "Fast snapshots cap street count");
+        verify(lines.stream().filter(s -> s.startsWith("RP,")).count() == 384, "Fast snapshots cap street vertices");
         verify(lines.stream().anyMatch(s -> s.equals("RP,0,0,29868300,121544000")), "BLE uses latitude then longitude in microdegrees");
         verify(lines.stream().allMatch(s -> s.getBytes(java.nio.charset.StandardCharsets.UTF_8).length + 1 <= 61), "Every command fits the minimum accepted ATT payload");
         verify(lines.size() < 4000, "A maximum road snapshot fits the queue");
         NearbyRoad building = new NearbyRoad("", "building",
             road("", lon, lat, lon + .0001, lat, lon, lat + .0001, lon, lat).getPoints());
         manyRoads.add(0, building);
-        List<String> detailed = map.commands(manyRoads, lat, lon);
-        verify(detailed.get(0).equals("RS,40") && detailed.get(2).equals("RB,0,4,4,1") &&
-            detailed.stream().filter(s -> s.startsWith("RB,")).count() == 40,
+        List<String> detailed = map.commands(manyRoads, lat, lon, null);
+        verify(detailed.get(0).equals("RS,25") && detailed.get(2).equals("RB,0,4,4,1") &&
+            detailed.stream().filter(s -> s.startsWith("RB,")).count() == 25,
             "Buildings use an optional tag and stay within the road transaction limit");
         System.out.println("RoadMap: " + checks + " checks passed");
     }

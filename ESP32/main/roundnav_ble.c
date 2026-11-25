@@ -233,6 +233,7 @@ esp_err_t roundnav_ble_init(QueueHandle_t event_queue)
     ble_svc_gap_device_name_set("RoundNav");
     int rc = ble_gatts_count_cfg(s_services);
     if (rc != 0) return ESP_FAIL;
+    if (ble_att_set_preferred_mtu(243) != 0) return ESP_FAIL;
     rc = ble_gatts_add_svcs(s_services);
     if (rc != 0) return ESP_FAIL;
     ble_hs_cfg.sync_cb = on_sync;

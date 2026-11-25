@@ -12,8 +12,9 @@ internal data class NearbyRoad(
 /** The display shows 150 m; the extra downloaded area covers movement during refresh. */
 internal object RoadMap {
     const val DOWNLOAD_RADIUS_M = 300.0
-    const val REFRESH_DISTANCE_M = 75.0
-    const val MIN_REQUEST_INTERVAL_MS = 5_000L
+    const val REFRESH_DISTANCE_M = 45.0
+    const val MIN_REQUEST_INTERVAL_MS = 2_500L
+    const val LOOK_AHEAD_M = 65.0
     const val RETRY_INTERVAL_MS = 10_000L
     const val MAX_LOCATION_AGE_MS = 15_000L
     const val MAX_LOCATION_ACCURACY_M = 50f
@@ -84,14 +85,19 @@ internal object RoadMap {
         return selected.map { points[it] }
     }
 
-    fun commands(roads: List<NearbyRoad>, lat: Double, lon: Double): List<String> {
+    fun commands(roads: List<NearbyRoad>, lat: Double, lon: Double, ahead: Pair<Double, Double>? = null): List<String> {
         val (buildings, streets) = roads.partition { it.type == "building" }
-        val nearbyBuildings = selectRoads(buildings, lat, lon).take(12)
-        val selected = nearbyBuildings + selectRoads(streets, lat, lon).take(40 - nearbyBuildings.size)
+        val nearest = selectRoads(buildings, lat, lon)
+        val nearbyBuildings = if (ahead == null) nearest.take(12) else {
+            val (aheadLon, aheadLat) = ahead
+            val forward = selectRoads(buildings, aheadLat, aheadLon)
+            (nearest.take(8) + forward.take(8) + nearest).distinct().take(16)
+        }
+        val selected = nearbyBuildings + selectRoads(streets, lat, lon).take(minOf(24, 40 - nearbyBuildings.size))
         val lines = mutableListOf("RS,${selected.size}", "RC,${(lat * 1e6).roundToInt()},${(lon * 1e6).roundToInt()}")
         selected.forEachIndexed { id, road ->
             val building = road.type == "building"
-            val points = simplify(road.points, if (building) 12 else 80)
+            val points = simplify(road.points, if (building) 8 else 16)
             val roadClass = when (road.type.lowercase()) {
                 "motorway", "motorway_link" -> 0
                 "trunk", "trunk_link" -> 1
