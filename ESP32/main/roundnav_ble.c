@@ -1,6 +1,8 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <math.h>
 #include "esp_log.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
@@ -20,6 +22,11 @@
 static const char *TAG = "RoundNavBLE";
 static QueueHandle_t s_event_queue;
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+/* RL/RQ offsets are metres relative to the last RC of the snapshot. */
+static int32_t s_shape_center_lat_e6, s_shape_center_lon_e6;
+static bool s_shape_center_valid;
+/* Same constant as Android RoadMap.METERS_PER_E6: 6378137 * pi / 180 / 1e6. */
+#define METERS_PER_E6 0.1113194907932736
 static void roundnav_ble_advertise(void);
 
 /* Same custom 128-bit UUIDs used by the RoundNav Android bridge. */
@@ -31,11 +38,79 @@ static const ble_uuid128_t s_rx_uuid = BLE_UUID128_INIT(
 static bool post_event(const roundnav_event_t *event)
 {
     if (s_event_queue == NULL || event == NULL) return false;
-    if (xQueueSend(s_event_queue, event, 0) != pdTRUE) {
+    /* A dense map snapshot produces many events per ATT write. Give the UI
+     * consumer a few ticks to drain instead of failing the whole write. */
+    if (xQueueSend(s_event_queue, event, pdMS_TO_TICKS(40)) != pdTRUE) {
         ESP_LOGW(TAG, "UI event queue full; dropped type=%d", (int)event->type);
         return false;
     }
     return true;
+}
+
+/* Compact shapes, one line each:
+ *   RL,id,class,x0,y0,dx1,dy1,...   street piece (class 0-4 or 6)
+ *   RQ,id,x0,y0,dx1,dy1,...         building footprint
+ * x is east and y is north, in whole metres. The first point is relative to
+ * RC; each further point is relative to the previous one. The line expands
+ * to the same ROAD_BEGIN/POINT/END events as the legacy RB/RP/RE commands. */
+static int parse_compact_shape(const char *line)
+{
+    const bool building = line[1] == 'Q' || line[1] == 'q';
+    long values[2 + 2 * ROAD_MAX_POINTS];
+    const int capacity = (int)(sizeof(values) / sizeof(values[0]));
+    int n = 0;
+    const char *p = line + 2;
+    while (*p == ',') {
+        char *end = NULL;
+        ++p;
+        const long value = strtol(p, &end, 10);
+        if (end == p || n >= capacity) return -1;
+        values[n++] = value;
+        p = end;
+        while (*p == ' ') ++p;
+    }
+    if (*p != '\0' || !s_shape_center_valid) return -1;
+    const int header = building ? 1 : 2;
+    if (n < header + 4 || ((n - header) & 1)) return -1;
+    const int id = (int)values[0];
+    const int road_class = building ? ROAD_CLASS_BUILDING : (int)values[1];
+    const int count = (n - header) / 2;
+    if (id < 0 || id >= ROAD_MAX_COUNT) return -1;
+    if (building) {
+        if (count < 4 || count > BUILDING_MAX_POINTS) return -1;
+    } else {
+        if (count < 2 || count > ROAD_MAX_POINTS) return -1;
+        if (!((road_class >= 0 && road_class <= 4) || road_class == ROAD_CLASS_SERVICE)) return -1;
+    }
+
+    const double north_e6_per_m = 1.0 / METERS_PER_E6;
+    const double lat_cos = cos(s_shape_center_lat_e6 * (0.017453292519943295 / 1000000.0));
+    if (lat_cos < 0.01) return -1;
+    const double east_e6_per_m = north_e6_per_m / lat_cos;
+
+    roundnav_event_t ev = {0};
+    ev.type = ROUNDNAV_EVENT_ROAD_BEGIN;
+    ev.road_id = id;
+    ev.count = count;
+    ev.road_class = road_class;
+    if (!post_event(&ev)) return -1;
+    long x = 0, y = 0;
+    for (int i = 0; i < count; ++i) {
+        x += values[header + 2 * i];
+        y += values[header + 2 * i + 1];
+        if (labs(x) > 20000 || labs(y) > 20000) return -1;
+        roundnav_event_t point = {0};
+        point.type = ROUNDNAV_EVENT_ROAD_POINT;
+        point.road_id = id;
+        point.index = i;
+        point.lat_e6 = s_shape_center_lat_e6 + (int32_t)lround(y * north_e6_per_m);
+        point.lon_e6 = s_shape_center_lon_e6 + (int32_t)lround(x * east_e6_per_m);
+        if (!post_event(&point)) return -1;
+    }
+    roundnav_event_t done = {0};
+    done.type = ROUNDNAV_EVENT_ROAD_END;
+    done.road_id = id;
+    return post_event(&done) ? 0 : -1;
 }
 
 static int parse_line(char *line)
@@ -50,13 +125,16 @@ static int parse_line(char *line)
 
     /* A complete road snapshot is staged between RS,count and RF. */
     if (sscanf(line, "RS,%d", &a) == 1) {
-        if (a < 0 || a > 40) return -1;
+        if (a < 0 || a > ROAD_MAX_COUNT) return -1;
         ev.type = ROUNDNAV_EVENT_ROAD_SNAPSHOT_BEGIN; ev.count = a;
         return post_event(&ev) ? 0 : -1;
     }
     if (strcmp(line, "RF") == 0) {
         ev.type = ROUNDNAV_EVENT_ROAD_SNAPSHOT_END;
         return post_event(&ev) ? 0 : -1;
+    }
+    if ((line[0] == 'R' || line[0] == 'r') && line[1] && strchr("LlQq", line[1]) && line[2] == ',') {
+        return parse_compact_shape(line);
     }
 
     /* GPS: optional fifth field carries progress along the committed route. */
@@ -72,13 +150,16 @@ static int parse_line(char *line)
     /* Nearby-map center: RC,lat_e6,lon_e6 */
     if (sscanf(line, " RC , %d , %d", &a, &b) == 2 && toupper((unsigned char)line[0]) == 'R' && toupper((unsigned char)line[1]) == 'C') {
         if (a < -90000000 || a > 90000000 || b < -180000000 || b > 180000000) return -1;
+        s_shape_center_lat_e6 = a;
+        s_shape_center_lon_e6 = b;
+        s_shape_center_valid = true;
         ev.type = ROUNDNAV_EVENT_ROAD_CENTER; ev.lat_e6 = a; ev.lon_e6 = b;
         return post_event(&ev) ? 0 : -1;
     }
     /* The optional building flag follows the legacy road class. */
     const int road_fields = sscanf(line, " RB , %d , %d , %d , %d", &a, &b, &c, &d);
     if (road_fields >= 3 && toupper((unsigned char)line[0]) == 'R' && toupper((unsigned char)line[1]) == 'B') {
-        if (a < 0 || a >= 40 || b < 2 || b > 80 || c < 0 || c > 4) return -1;
+        if (a < 0 || a >= ROAD_MAX_COUNT || b < 2 || b > ROAD_MAX_POINTS || c < 0 || c > 4) return -1;
         if (road_fields == 4 && (c != 4 || d != 1 || b < 4 || b > BUILDING_MAX_POINTS)) return -1;
         ev.type = ROUNDNAV_EVENT_ROAD_BEGIN; ev.road_id = a; ev.count = b;
         ev.road_class = road_fields == 4 ? ROAD_CLASS_BUILDING : c;
@@ -86,13 +167,13 @@ static int parse_line(char *line)
     }
     /* Road point: RP,id,index,lat_e6,lon_e6 */
     if (sscanf(line, " RP , %d , %d , %d , %d", &a, &b, &c, &d) == 4 && toupper((unsigned char)line[0]) == 'R' && toupper((unsigned char)line[1]) == 'P') {
-        if (a < 0 || a >= 40 || b < 0 || b >= 80 || c < -90000000 || c > 90000000 || d < -180000000 || d > 180000000) return -1;
+        if (a < 0 || a >= ROAD_MAX_COUNT || b < 0 || b >= ROAD_MAX_POINTS || c < -90000000 || c > 90000000 || d < -180000000 || d > 180000000) return -1;
         ev.type = ROUNDNAV_EVENT_ROAD_POINT; ev.road_id = a; ev.index = b; ev.lat_e6 = c; ev.lon_e6 = d;
         return post_event(&ev) ? 0 : -1;
     }
     /* Road end: RE,id */
     if (sscanf(line, " RE , %d", &a) == 1 && toupper((unsigned char)line[0]) == 'R' && toupper((unsigned char)line[1]) == 'E') {
-        if (a < 0 || a >= 40) return -1;
+        if (a < 0 || a >= ROAD_MAX_COUNT) return -1;
         ev.type = ROUNDNAV_EVENT_ROAD_END; ev.road_id = a;
         return post_event(&ev) ? 0 : -1;
     }

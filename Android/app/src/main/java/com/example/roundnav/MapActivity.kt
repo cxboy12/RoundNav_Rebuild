@@ -53,6 +53,7 @@ import kotlin.math.cos
 import kotlin.math.log2
 import kotlin.math.pow
 import kotlin.math.roundToLong
+import kotlin.math.sin
 
 class MapActivity : ComponentActivity() {
     companion object {
@@ -499,11 +500,18 @@ class MapActivity : ComponentActivity() {
         }
         if (active && BuildConfig.VIETMAP_ROADS_URL.isBlank()) {
             val coveragePoint = next ?: current?.route?.coordinates?.firstOrNull()?.let { (lon, lat) -> LatLng(lat, lon) }
-            coveragePoint?.let(::followRoundMap)
+            coveragePoint?.let { followRoundMap(it, if (moving) point?.bearing else null) }
         }
     }
 
-    private fun followRoundMap(point: LatLng) {
+    private fun offset(point: LatLng, bearing: Int, meters: Double): LatLng {
+        val angle = Math.toRadians(bearing.toDouble())
+        val metersPerDegreeLon = 111_319.49 * cos(Math.toRadians(point.latitude))
+        return LatLng(point.latitude + meters * cos(angle) / 111_319.49,
+            point.longitude + meters * sin(angle) / metersPerDegreeLon)
+    }
+
+    private fun followRoundMap(point: LatLng, bearing: Int? = null) {
         val controller = mapController ?: return
         val shortSideDp = minOf(map.width, map.height) / resources.displayMetrics.density
         if (shortSideDp <= 0) return
@@ -511,9 +519,22 @@ class MapActivity : ComponentActivity() {
         val groundWidth = shortSideDp * (2 * Math.PI * 6_378_137 / 512) * cos(Math.toRadians(point.latitude))
         val zoom = log2(groundWidth / (2 * (screenRadius + 2 * RoadMap.REFRESH_DISTANCE_M)))
             .coerceIn(BUILDING_MIN_ZOOM, 16.0)
-        // On compact layouts, keep building tiles and use the smaller movement buffer at that zoom.
         val camera = controller.cameraPosition
         val bounds = controller.projection.visibleRegion.latLngBounds
+        // While driving the route, centre the phone map ahead of the rider so the next tiles
+        // are already loaded when the round screen asks for them. The round-screen radius
+        // behind the rider stays inside the view (lead <= half width - radius - 20 m).
+        val targetHalfWidth = groundWidth / (2 * 2.0.pow(zoom))
+        val lead = (targetHalfWidth - screenRadius - 20).coerceIn(0.0, 80.0)
+        if (bearing != null && lead >= 40) {
+            val ahead = offset(point, bearing, RoadMap.REFRESH_DISTANCE_M + 15)
+            if (camera.zoom >= BUILDING_MIN_ZOOM &&
+                VietmapViewportRoads.covers(bounds, point.latitude, point.longitude, screenRadius + 10) &&
+                VietmapViewportRoads.covers(bounds, ahead.latitude, ahead.longitude, screenRadius + 10)) return
+            controller.moveCamera(CameraUpdateFactory.newLatLngZoom(offset(point, bearing, lead), zoom))
+            return
+        }
+        // On compact layouts, keep building tiles and use the smaller movement buffer at that zoom.
         val halfWidth = groundWidth / (2 * 2.0.pow(camera.zoom))
         val buffer = ((halfWidth - screenRadius) / 2).coerceIn(0.0, RoadMap.REFRESH_DISTANCE_M)
         if (camera.zoom >= BUILDING_MIN_ZOOM &&

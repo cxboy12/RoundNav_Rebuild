@@ -889,7 +889,7 @@ class BridgeService : Service() {
                     }
                     else -> null
                 }
-                val commands = RoadMap.commands(roads, origin.latitude, origin.longitude, ahead)
+                val commands = RoadMap.commands(roads, origin.latitude, origin.longitude, ahead, payloadLimit)
                 val count = commands.first().substringAfter(',').toInt()
                 status = status.copy(roads = "正在发送 $count 条道路；GPS 持续跟随")
                 if (!enqueueBatch(commands) onSent@{

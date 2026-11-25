@@ -120,20 +120,66 @@ public final class RoadMapChecks {
         verify(simplified.contains(longRoad.get(100)), "Simplification preserves a sharp corner");
 
         List<NearbyRoad> manyRoads = new ArrayList<>();
-        for (int i = 0; i < 50; i++) manyRoads.add(new NearbyRoad("road " + i, "primary", longRoad));
+        for (int i = 0; i < 80; i++) {
+            List<Pair<Double, Double>> street = new ArrayList<>();
+            for (int j = 0; j <= 200; j++) street.add(new Pair<>(lon - .001 + j * .00001, lat + (i - 40) * .00003 + (j == 100 ? .0003 : 0)));
+            manyRoads.add(new NearbyRoad("road " + i, i % 2 == 0 ? "primary" : "minor", street));
+        }
         List<String> lines = map.commands(manyRoads, lat, lon, null);
-        verify(lines.get(0).equals("RS,24") && lines.get(lines.size()-1).equals("RF"), "Fast snapshots cap street count");
-        verify(lines.stream().filter(s -> s.startsWith("RP,")).count() == 384, "Fast snapshots cap street vertices");
-        verify(lines.stream().anyMatch(s -> s.equals("RP,0,0,29868300,121544000")), "BLE uses latitude then longitude in microdegrees");
-        verify(lines.stream().allMatch(s -> s.getBytes(java.nio.charset.StandardCharsets.UTF_8).length + 1 <= 61), "Every command fits the minimum accepted ATT payload");
-        verify(lines.size() < 4000, "A maximum road snapshot fits the queue");
-        NearbyRoad building = new NearbyRoad("", "building",
-            road("", lon, lat, lon + .0001, lat, lon, lat + .0001, lon, lat).getPoints());
-        manyRoads.add(0, building);
-        List<String> detailed = map.commands(manyRoads, lat, lon, null);
-        verify(detailed.get(0).equals("RS,25") && detailed.get(2).equals("RB,0,4,4,1") &&
-            detailed.stream().filter(s -> s.startsWith("RB,")).count() == 25,
-            "Buildings use an optional tag and stay within the road transaction limit");
+        int shapes = Integer.parseInt(lines.get(0).substring(3));
+        verify(lines.get(0).startsWith("RS,") && shapes == map.MAX_STREET_ENTRIES && lines.get(lines.size() - 1).equals("RF"),
+            "Dense snapshots fill the street budget");
+        verify(lines.get(1).equals("RC,29868300,121544000"), "BLE centre uses latitude then longitude in microdegrees");
+        verify(lines.stream().filter(s -> s.startsWith("RL,")).count() == shapes, "Each street piece is one compact command");
+        verify(lines.stream().allMatch(s -> s.getBytes(java.nio.charset.StandardCharsets.UTF_8).length + 1 <= 61),
+            "Every command fits the minimum accepted ATT payload");
+        verify(map.commands(manyRoads, lat, lon, null, 240).stream()
+                .allMatch(s -> s.getBytes(java.nio.charset.StandardCharsets.UTF_8).length + 1 <= 240),
+            "Every command fits the negotiated ATT payload");
+        boolean decodedClose = true;
+        int maxPoints = 0;
+        for (String line : lines) {
+            if (!line.startsWith("RL,")) continue;
+            List<Pair<Double, Double>> decoded = map.decodeShape(line, 29868300, 121544000);
+            maxPoints = Math.max(maxPoints, decoded.size());
+            for (Pair<Double, Double> p : decoded) {
+                double best = Double.MAX_VALUE;
+                for (NearbyRoad r : manyRoads) for (Pair<Double, Double> q : r.getPoints())
+                    best = Math.min(best, map.distanceMeters(p.getSecond(), p.getFirst(), q.getSecond(), q.getFirst()));
+                if (best > 1.0) decodedClose = false;
+            }
+        }
+        verify(decodedClose, "Compact metre offsets decode within 1 m of the source geometry");
+        verify(maxPoints >= 2 && maxPoints <= 24, "Street pieces stay within the firmware point capacity");
+        List<String> ordered = map.commands(Arrays.asList(
+            new NearbyRoad("", "primary", road("", lon, lat, lon + .001, lat).getPoints()),
+            new NearbyRoad("", "minor", road("", lon, lat, lon, lat + .001).getPoints())), lat, lon, null);
+        verify(ordered.get(0).equals("RS,2") && ordered.get(2).startsWith("RL,0,4,") && ordered.get(3).startsWith("RL,1,2,"),
+            "Local streets are drawn before major roads");
+
+        List<NearbyRoad> mixed = new ArrayList<>();
+        mixed.add(new NearbyRoad("", "path", road("", lon, lat, lon + .001, lat).getPoints()));
+        mixed.add(new NearbyRoad("", "service", road("", lon, lat, lon, lat + .001).getPoints()));
+        mixed.add(new NearbyRoad("far", "primary", road("", lon + .01, lat, lon + .011, lat).getPoints()));
+        for (int i = 0; i < 120; i++) {
+            double bx = lon + (i % 12) * .00015, by = lat + (i / 12) * .00015;
+            mixed.add(new NearbyRoad("", "building",
+                road("", bx, by, bx + .0001, by, bx + .0001, by + .0001, bx, by + .0001, bx, by).getPoints()));
+        }
+        mixed.add(new NearbyRoad("", "building", road("", lon, lat, lon + .00001, lat, lon + .00001, lat + .00001, lon, lat + .00001, lon, lat).getPoints()));
+        List<String> detailed = map.commands(mixed, lat, lon, null);
+        long buildingLines = detailed.stream().filter(s -> s.startsWith("RQ,")).count();
+        verify(buildingLines == map.MAX_BUILDINGS && detailed.get(2).startsWith("RQ,0,"),
+            "Buildings come first and fill their own budget");
+        List<Pair<Double, Double>> corners = map.decodeShape(detailed.get(2), 29868300, 121544000);
+        verify(corners.size() == 4, "A closed rectangular footprint is sent as four corners");
+        verify(map.distanceMeters(corners.get(0).getSecond(), corners.get(0).getFirst(),
+                corners.get(2).getSecond(), corners.get(2).getFirst()) > 5,
+            "Footprints too small to see are skipped");
+        verify(detailed.stream().anyMatch(s -> s.startsWith("RL,") && s.split(",")[2].equals("6")) &&
+            detailed.stream().filter(s -> s.startsWith("RL,")).count() == 1,
+            "Alleys use the service class; footpaths and geometry beyond the screen are dropped");
+        verify(Integer.parseInt(detailed.get(0).substring(3)) <= map.MAX_ENTRIES, "A snapshot fits the firmware road store");
         double matched = playback.match(north, lon + .0004, cornerDistance, 10.0);
         verify(matched > cornerDistance && playback.match(north, lon + .00035, matched, 10.0) == matched,
             "GPS matching advances after the turn and does not regress with jitter");

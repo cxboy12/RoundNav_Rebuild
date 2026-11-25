@@ -1,9 +1,14 @@
 #pragma once
 #include "roundnav_events.h"
 
-#define ROAD_MAX_COUNT 40
-#define ROAD_MAX_POINTS 80
+/* One snapshot holds up to 64 street pieces and 96 building footprints.
+ * Must match RoadMap.MAX_ENTRIES on Android. The store lives in PSRAM. */
+#define ROAD_MAX_COUNT 160
+/* Android clips streets to the visible area and sends at most 24 points. */
+#define ROAD_MAX_POINTS 32
 #define ROAD_CLASS_BUILDING 5
+/* Service roads and alleys (hem): drawn thinner than ordinary streets. */
+#define ROAD_CLASS_SERVICE 6
 #define BUILDING_MAX_POINTS 12
 
 typedef struct { int32_t lat; int32_t lon; } geo_point_t;

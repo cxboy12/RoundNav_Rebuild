@@ -30,7 +30,7 @@
 #define SCREEN_BG_RGB 0x0B1926
 #define MAP_BG_RGB 0xD6E8F4
 #define MAP_BORDER_RGB 0x4F90A7
-#define BUILDING_RGB 0x9FBCD3
+#define BUILDING_RGB 0x98ADC2
 #define POSITION_RGB 0x123B58
 #define ROUTE_RGB 0x246BCA
 
@@ -68,10 +68,11 @@ static lv_obj_t *s_nav_arrow_lines[2];
 static lv_obj_t *s_route_line;
 static lv_obj_t *s_road_lines[ROAD_MAX_COUNT];
 static lv_obj_t *s_marker_lines[MARKER_ROWS];
-static lv_point_precise_t s_road_screen[ROAD_MAX_COUNT][ROAD_MAX_POINTS];
+/* 160 x 32 points and the two road snapshots are allocated in PSRAM. */
+static lv_point_precise_t (*s_road_screen)[ROAD_MAX_POINTS];
 static lv_point_precise_t s_route_screen[ROUTE_MAX_POINTS];
 static lv_point_precise_t s_marker_points[MARKER_ROWS][2];
-static road_store_t s_road_store;
+static road_store_t *s_road_store;
 static geo_point_t s_route[ROUTE_MAX_POINTS];
 static uint8_t s_route_traffic[ROUTE_MAX_POINTS];
 static char s_route_turns[ROUTE_MAX_POINTS];
@@ -156,23 +157,27 @@ static void project_point(const geo_point_t *p, const map_origin_t *origin, floa
 static lv_color_t road_color(int road_class)
 {
     switch (road_class) {
-    case 0: return lv_color_hex(0x172638); /* motorway */
-    case 1: return lv_color_hex(0x24374C); /* trunk */
-    case 2: return lv_color_hex(0x31465D); /* primary */
-    case 3: return lv_color_hex(0x4B6278); /* secondary */
+    /* Dark, high-contrast streets on the light map, as on dash navigators. */
+    case 0: return lv_color_hex(0x0E1621); /* motorway */
+    case 1: return lv_color_hex(0x142030); /* trunk */
+    case 2: return lv_color_hex(0x1A2736); /* primary */
+    case 3: return lv_color_hex(0x212E3D); /* secondary / tertiary */
     case ROAD_CLASS_BUILDING: return lv_color_hex(BUILDING_RGB);
-    default: return lv_color_hex(0x6D859D); /* local roads */
+    case ROAD_CLASS_SERVICE: return lv_color_hex(0x4A5868); /* service, alleys */
+    default: return lv_color_hex(0x2B3847); /* local streets */
     }
 }
 
 static int road_width(int road_class)
 {
+    /* About 1.27 px per metre at the 150 m display radius. */
     if (road_class == ROAD_CLASS_BUILDING) return 1;
-    if (road_class <= 0) return 9;
-    if (road_class == 1) return 7;
-    if (road_class == 2) return 6;
-    if (road_class == 3) return 4;
-    return 3;
+    if (road_class == ROAD_CLASS_SERVICE) return 4;
+    if (road_class <= 0) return 14;
+    if (road_class == 1) return 13;
+    if (road_class == 2) return 12;
+    if (road_class == 3) return 10;
+    return 7;
 }
 
 static lv_color_t route_color(uint8_t traffic)
@@ -226,7 +231,7 @@ static void fill_building(const map_cache_t *back, const road_t *road)
 static void start_cache_build(map_cache_t *back)
 {
     back->origin = camera_origin();
-    memcpy(s_build_roads, s_road_store.roads, sizeof(s_road_store.roads));
+    memcpy(s_build_roads, s_road_store->roads, sizeof(s_road_store->roads));
     for (int x = 0; x < ROAD_BITMAP_PX; ++x) back->pixels[x] = s_map_background;
     s_build_row = 1;
     s_build_road = 0;
@@ -391,7 +396,7 @@ static void compose_map_view(const map_cache_t *front, int dx, int dy)
 
 static void refresh_cached_map(void)
 {
-    if (!s_map_view || !s_center_valid) return;
+    if (!s_map_view || !s_center_valid || !s_road_store) return;
     map_cache_t *front = &s_map_cache[s_cache_front];
     int dx = (int)lround((front->origin.lon - s_center_lon_e6) * front->origin.east_scale);
     int dy = (int)lround((s_center_lat_e6 - front->origin.lat) * NORTH_PIXELS_PER_E6);
@@ -423,10 +428,10 @@ static void refresh_cached_map(void)
 
 static void render_roads(bool refresh_style)
 {
-    if (s_map_view || !s_map_clip || !s_center_valid) return;
+    if (s_map_view || !s_map_clip || !s_center_valid || !s_road_store || !s_road_screen) return;
     const map_origin_t origin = camera_origin();
     for (int r = 0; r < ROAD_MAX_COUNT; ++r) {
-        road_t *road = &s_road_store.roads[r];
+        road_t *road = &s_road_store->roads[r];
         if (!road->active || road->count < 2) {
             if (s_road_lines[r]) lv_obj_add_flag(s_road_lines[r], LV_OBJ_FLAG_HIDDEN);
             continue;
@@ -723,7 +728,7 @@ static bool init_cached_map(void)
 {
     s_cache_stride = lv_draw_buf_width_to_stride(ROAD_BITMAP_PX, LV_COLOR_FORMAT_RGB565) / sizeof(uint16_t);
     s_view_stride = lv_draw_buf_width_to_stride(MAP_DIAMETER_PX, LV_COLOR_FORMAT_RGB565) / sizeof(uint16_t);
-    s_build_roads = heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN, sizeof(s_road_store.roads),
+    s_build_roads = heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN, sizeof(s_road_store->roads),
                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_build_roads) return false;
     for (int i = 0; i < 2; ++i) {
@@ -772,6 +777,10 @@ static bool init_cached_map(void)
 void nav_ui_init(void)
 {
     if (!ui_lock()) { ESP_LOGE(TAG, "Could not lock LVGL during UI init"); return; }
+    s_road_store = heap_caps_calloc(1, sizeof(*s_road_store), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_road_store) s_road_store = heap_caps_calloc(1, sizeof(*s_road_store), MALLOC_CAP_8BIT);
+    s_road_screen = heap_caps_calloc(ROAD_MAX_COUNT, sizeof(*s_road_screen), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_road_store) ESP_LOGE(TAG, "Road store allocation failed; nearby map disabled");
     lv_obj_t *screen = lv_screen_active();
     lv_obj_set_style_bg_color(screen, lv_color_hex(SCREEN_BG_RGB), 0);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
@@ -827,7 +836,6 @@ void nav_ui_init(void)
     lv_obj_set_style_text_font(s_ble_label, LV_FONT_DEFAULT, 0);
     lv_obj_align(s_ble_label, LV_ALIGN_BOTTOM_MID, 0, -12);
 
-    memset(&s_road_store, 0, sizeof(s_road_store));
     s_route_count = 0;
     draw_nav_arrow();
     create_position_marker();
@@ -841,7 +849,7 @@ void nav_ui_set_ble_state(bool connected)
 {
     if (!ui_lock()) return;
     if (!connected) {
-        road_store_abort(&s_road_store);
+        road_store_abort(s_road_store);
         s_pending_route_expected = 0;
         s_camera_animating = false;
         s_gps_valid = false; /* First fix after reconnect snaps to its actual location. */
@@ -936,7 +944,7 @@ void nav_ui_apply_map_event(const roundnav_event_t *event)
 
 void nav_ui_apply_road_event(const roundnav_event_t *event)
 {
-    if (event == NULL || !ui_lock()) return;
+    if (event == NULL || !s_road_store || !ui_lock()) return;
     if (event->type == ROUNDNAV_EVENT_ROAD_SNAPSHOT_BEGIN) {
         ESP_LOGI(TAG, "Road snapshot begin: expected=%d", event->count);
     }
@@ -946,7 +954,7 @@ void nav_ui_apply_road_event(const roundnav_event_t *event)
         s_center_lon_e6 = event->lon_e6;
         s_center_valid = true;
     }
-    const int changed = road_store_apply(&s_road_store, event);
+    const int changed = road_store_apply(s_road_store, event);
     if (changed < 0) ESP_LOGW(TAG, "Incomplete/invalid road batch; keeping previous roads");
     if (changed > 0) {
         if (s_map_view) {
@@ -961,7 +969,7 @@ void nav_ui_apply_road_event(const roundnav_event_t *event)
             int active_roads = 0;
             int buildings = 0;
             for (int r = 0; r < ROAD_MAX_COUNT; ++r) {
-                const road_t *road = &s_road_store.roads[r];
+                const road_t *road = &s_road_store->roads[r];
                 if (!road->active) continue;
                 if (road->road_class == ROAD_CLASS_BUILDING) buildings++;
                 else active_roads++;
