@@ -134,6 +134,13 @@ public final class RoadMapChecks {
         verify(detailed.get(0).equals("RS,25") && detailed.get(2).equals("RB,0,4,4,1") &&
             detailed.stream().filter(s -> s.startsWith("RB,")).count() == 25,
             "Buildings use an optional tag and stay within the road transaction limit");
+        double matched = playback.match(north, lon + .0004, cornerDistance, 10.0);
+        verify(matched > cornerDistance && playback.match(north, lon + .00035, matched, 10.0) == matched,
+            "GPS matching advances after the turn and does not regress with jitter");
+        verify(playback.match(north + .001, lon, matched, 10.0) == null,
+            "An off-route fix has no turn or route progress");
+        verify(playback.nearestVertex(cornerDistance + 3) == 2,
+            "A turn distance is anchored to the matching vertex of the expanded shape");
         System.out.println("RoadMap: " + checks + " checks passed");
     }
 }

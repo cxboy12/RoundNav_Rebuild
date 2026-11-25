@@ -66,11 +66,23 @@ internal object RouteApi {
             lat in -90.0..90.0 && lon in -180.0..180.0
         }) { "Vietmap 路线坐标无效" }
         val instructions = path.optJSONArray("instructions")
+        val steps = List(instructions?.length() ?: 0) { instructions?.optJSONObject(it) }
+        val shape = RoutePlayback(coordinates)
+        val stepDistances = steps.map { it?.nonNegative("distance") }
+        val instructionTotal = stepDistances.filterNotNull().sum()
+        val finishIndex = steps.lastOrNull { it?.optInt("sign") == 4 }?.optJSONArray("interval")?.optInt(0, -1)
+        // Some Route v4 responses expand the polyline without updating instruction indices.
+        // Re-anchor those instructions by accumulated metres when the two total lengths agree.
+        val useStepDistances = finishIndex != null && finishIndex != coordinates.lastIndex &&
+            stepDistances.all { it != null } && instructionTotal > 0 &&
+            kotlin.math.abs(instructionTotal - shape.totalMeters) <= maxOf(15.0, shape.totalMeters * 0.02)
         val turns = buildList {
-            if (instructions == null) return@buildList
-            for (index in 0 until instructions.length()) {
-                val instruction = instructions.optJSONObject(index) ?: continue
-                val start = instruction.optJSONArray("interval")?.optInt(0, -1) ?: continue
+            var traveled = 0.0
+            for ((index, instruction) in steps.withIndex()) {
+                if (instruction == null) continue
+                val start = if (useStepDistances) shape.nearestVertex(traveled * shape.totalMeters / instructionTotal)
+                    else instruction.optJSONArray("interval")?.optInt(0, -1) ?: -1
+                traveled += stepDistances[index] ?: 0.0
                 if (start !in 1 until coordinates.lastIndex) continue
                 val direction = when (instruction.optInt("sign")) {
                     in -3..-1 -> TurnDirection.LEFT
@@ -79,7 +91,7 @@ internal object RouteApi {
                 }
                 add(RouteTurn(start, direction))
             }
-        }
+        }.distinctBy { it.shapeIndex }
         val congestion = path.optJSONObject("annotations")?.optJSONArray("congestion")
         val traffic = if (congestion == null) emptyList() else {
             val edges = MutableList(coordinates.lastIndex) { RouteTraffic.UNKNOWN }
@@ -163,13 +175,19 @@ internal object RouteApi {
     fun toBleCommands(route: RouteResult): ArrayList<String> {
         val drawable = displayRoute(route)
         val selected = drawable.coordinates
+        val turns = drawable.turns.associateBy { it.shapeIndex }
         val commands = arrayListOf("B,${selected.size}")
         selected.forEachIndexed { index, p ->
             val lon = p.first
             val lat = p.second
             val traffic = drawable.traffic.getOrNull(index)?.takeUnless { it == RouteTraffic.UNKNOWN }
             val point = "P,$index,${(lat * 1e6).roundToInt()},${(lon * 1e6).roundToInt()}"
-            commands.add(if (traffic == null) point else "$point,${traffic.ordinal}")
+            val turn = turns[index]?.direction?.command
+            commands.add(when {
+                turn != null -> "$point,${traffic?.ordinal ?: 0},$turn"
+                traffic != null -> "$point,${traffic.ordinal}"
+                else -> point
+            })
         }
         commands.add("E")
         return commands

@@ -77,9 +77,12 @@ class BridgeService : Service() {
         }
 
         internal fun sendRoute(context: Context, route: RouteResult, indoor: Boolean, receiver: ResultReceiver) {
+            val drawable = RouteApi.displayRoute(route)
             context.startService(Intent(context, BridgeService::class.java)
                 .setAction(ACTION_SEND_ROUTE)
-                .putStringArrayListExtra(EXTRA_LINES, RouteApi.toBleCommands(route))
+                .putStringArrayListExtra(EXTRA_LINES, RouteApi.toBleCommands(drawable))
+                .putExtra(EXTRA_PLAYBACK_POINTS, drawable.coordinates.flatMap { (lon, lat) -> listOf(lon, lat) }.toDoubleArray())
+                .putExtra(EXTRA_PLAYBACK_TURNS, RouteTurn.encode(drawable.turns))
                 .putExtra(EXTRA_INDOOR, indoor)
                 .putExtra(EXTRA_ROUTE_STATUS, receiver))
         }
@@ -152,6 +155,8 @@ class BridgeService : Service() {
         var lastTick: Long? = null
     }
     private var playback: Playback? = null
+    private var liveRoute: RoutePlayback? = null
+    private var liveProgress: Double? = null
     private val locationAgeLimit: Long get() = if (mapMode == MapMode.COARSE) 60_000L else RoadMap.MAX_LOCATION_AGE_MS
     private val locationAccuracyLimit: Float get() = if (mapMode == MapMode.COARSE) 1_000f else RoadMap.MAX_LOCATION_ACCURACY_M
     private var lastRoadWaitReason: String? = null
@@ -185,7 +190,7 @@ class BridgeService : Service() {
                 status = status.copy(location = "${locationDetails(location)}；等待新定位")
             }
             maybeFetchRoads()
-            handler.postDelayed(this, 1_000)
+            handler.postDelayed(this, if (playback?.lastTick != null) 500 else 1_000)
         }
     }
 
@@ -289,7 +294,8 @@ class BridgeService : Service() {
         if (intent?.action == ACTION_SEND_ROUTE) {
             IntentCompat.getParcelableExtra(intent, EXTRA_ROUTE_STATUS, ResultReceiver::class.java)?.let { receiver ->
                 sendPreview(intent.getStringArrayListExtra(EXTRA_LINES).orEmpty(),
-                    intent.getBooleanExtra(EXTRA_INDOOR, false), receiver)
+                    intent.getBooleanExtra(EXTRA_INDOOR, false), receiver,
+                    intent.getDoubleArrayExtra(EXTRA_PLAYBACK_POINTS), RouteTurn.decode(intent.getIntArrayExtra(EXTRA_PLAYBACK_TURNS)))
             }
             if (!running) stopSelf(startId)
             return if (running) START_STICKY else START_NOT_STICKY
@@ -446,6 +452,8 @@ class BridgeService : Service() {
         pendingPlaybackNavigation = null
         lastPlaybackNavigation = null
         interruptedPlayback?.let { failPlayback(it.id, "蓝牙已断开，连接就绪后可从起点重播") }
+        liveRoute = null
+        liveProgress = null
         writeAttempts = 0
         requestGeneration++
         fetchingRoads = false
@@ -463,7 +471,7 @@ class BridgeService : Service() {
         else enqueueBatch(listOf(raw))
     }
 
-    private fun sendPreview(lines: List<String>, indoor: Boolean, receiver: ResultReceiver) {
+    private fun sendPreview(lines: List<String>, indoor: Boolean, receiver: ResultReceiver, points: DoubleArray?, turns: List<RouteTurn>) {
         if (!running || txCharacteristic == null) {
             receiver.routeStatus(0, "请在首页启动蓝牙并等待 RoundNav 就绪，再发送路线")
             return
@@ -492,6 +500,11 @@ class BridgeService : Service() {
         receiver.routeStatus(ROUTE_QUEUED, "路线已排队，等待蓝牙写入")
         val queued = enqueueBatch(lines) {
             if (routeReceiver === receiver) {
+                if (!indoor && points != null && points.size >= 4 && points.size % 2 == 0) {
+                    liveRoute = RoutePlayback(List(points.size / 2) { points[it * 2] to points[it * 2 + 1] }, turns)
+                    liveProgress = null
+                    latestLocation?.takeIf(::isRouteLocation)?.let(::queueLiveFix)
+                }
                 Log.i(TAG, "Route ATT writes complete: points=${lines.size - 2}")
                 finishRouteSend("蓝牙写入完成，请查看圆屏")
             }
@@ -530,7 +543,7 @@ class BridgeService : Service() {
         playback = active
         playbackStatus = PlaybackStatus(id, PlaybackPhase.UPLOADING, totalMeters = path.totalMeters)
         status = status.copy(location = "正在准备沿线模拟 · 非手机位置")
-        val commands = RouteApi.toBleCommands(RouteResult(coordinates, null, null, traffic = traffic))
+        val commands = RouteApi.toBleCommands(RouteResult(coordinates, null, null, turns, traffic))
         val queued = enqueueBatch(commands) {
             if (playback === active) {
                 Log.i(TAG, "Playback route ATT writes complete: points=${coordinates.size}")
@@ -590,7 +603,7 @@ class BridgeService : Service() {
             else -> "进行中"
         }
         status = status.copy(location = "沿线模拟$action · $progress")
-        queueGps(location)
+        queueGps(location, active.traveled)
         queuePlaybackNavigation(guidance.bleLine())
     }
 
@@ -719,6 +732,8 @@ class BridgeService : Service() {
         finishRouteSend("定位模式已切换，路线发送中断，可重新发送")
         playback = null
         playbackStatus = null
+        liveRoute = null
+        liveProgress = null
         mapMode = mode
         testMapLocation = testPoint
         lastBearing = 0
@@ -797,12 +812,21 @@ class BridgeService : Service() {
         previousLocation = Location(location)
         lastGpsSentElapsedMs = now
         if (testMapLocation != null) return
-        queueGps(location)
+        queueLiveFix(location)
         maybeFetchRoads()
     }
 
-    private fun queueGps(location: Location) {
-        pendingGps = Write("G,${(location.latitude * 1e6).roundToInt()},${(location.longitude * 1e6).roundToInt()},$lastBearing")
+    private fun queueLiveFix(location: Location) {
+        val path = liveRoute?.takeIf { mapMode == MapMode.LIVE }
+        val progress = path?.match(location.latitude, location.longitude, liveProgress, location.accuracy.toDouble())
+        if (progress != null) liveProgress = progress
+        queueGps(location, progress)
+        if (path != null) queuePlaybackNavigation(progress?.let { path.guidanceAt(it).bleLine() } ?: "S,-1,0")
+    }
+
+    private fun queueGps(location: Location, progress: Double? = null) {
+        val gps = "G,${(location.latitude * 1e6).roundToInt()},${(location.longitude * 1e6).roundToInt()},$lastBearing"
+        pendingGps = Write(if (progress == null) gps else "$gps,${(progress * 10).roundToInt()}")
         Log.d(TAG, "GPS TX queued provider=${location.provider}")
         drainQueue()
     }

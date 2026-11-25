@@ -68,12 +68,43 @@ internal class RoutePlayback(coordinates: List<Pair<Double, Double>>, turns: Lis
             ?.let { it to turn.direction }
     }
 
+    fun nearestVertex(distanceMeters: Double): Int {
+        val index = shapeDistances.binarySearch(distanceMeters)
+        if (index >= 0) return index
+        val after = (-index - 1).coerceIn(1, shapeDistances.lastIndex)
+        return if (distanceMeters - shapeDistances[after - 1] <= shapeDistances[after] - distanceMeters) after - 1 else after
+    }
+
     fun guidanceAt(distanceMeters: Double): PlaybackGuidance {
         val distance = distanceMeters.coerceIn(0.0, totalMeters)
         val next = turnDistances.firstOrNull { (at, _) -> at > distance }
         val remaining = ceil((next?.first ?: totalMeters) - distance).toInt()
         val direction = next?.second?.takeIf { remaining <= TURN_NOTICE_METERS }
         return PlaybackGuidance(direction, remaining)
+    }
+
+    /** Match a fix to the nearby part of the route, retaining progress through GPS jitter. */
+    fun match(latitude: Double, longitude: Double, previous: Double?, accuracy: Double): Double? {
+        val scale = cos(Math.toRadians(latitude))
+        var bestDistance = accuracy.coerceIn(18.0, 35.0)
+        var best: Double? = null
+        for (segment in segments) {
+            val start = segment.endMeters - segment.length
+            if (previous != null && (segment.endMeters < previous - 25 || start > previous + 120)) continue
+            val east = (segment.end.first - segment.start.first) * scale
+            val north = segment.end.second - segment.start.second
+            val x = (longitude - segment.start.first) * scale
+            val y = latitude - segment.start.second
+            val fraction = ((x * east + y * north) / (east * east + north * north)).coerceIn(0.0, 1.0)
+            val distance = RoadMap.distanceMeters(latitude, longitude,
+                segment.start.second + north * fraction, segment.start.first + (segment.end.first - segment.start.first) * fraction)
+            if (distance >= bestDistance) continue
+            val progress = start + segment.length * fraction
+            if (previous != null && progress !in (previous - 25)..(previous + 120)) continue
+            bestDistance = distance
+            best = progress
+        }
+        return best?.let { maxOf(previous ?: 0.0, it) }
     }
 
     fun pointAt(distanceMeters: Double): PlaybackPoint {

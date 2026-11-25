@@ -59,10 +59,14 @@ static int parse_line(char *line)
         return post_event(&ev) ? 0 : -1;
     }
 
-    /* GPS: G,latitude_e6,longitude_e6,bearing_degrees */
-    if (sscanf(line, " %c , %d , %d , %d", &kind, &a, &b, &c) == 4 && (kind == 'G' || kind == 'g')) {
+    /* GPS: optional fifth field carries progress along the committed route. */
+    const int gps_fields = sscanf(line, " %c , %d , %d , %d , %d", &kind, &a, &b, &c, &d);
+    if (gps_fields >= 4 && (kind == 'G' || kind == 'g')) {
         if (a < -90000000 || a > 90000000 || b < -180000000 || b > 180000000 || c < 0 || c > 359) return -1;
+        if (gps_fields == 5 && d < 0) return -1;
         ev.type = ROUNDNAV_EVENT_GPS; ev.lat_e6 = a; ev.lon_e6 = b; ev.bearing_deg = c;
+        ev.has_route_progress = gps_fields == 5;
+        ev.route_progress_dm = ev.has_route_progress ? d : 0;
         return post_event(&ev) ? 0 : -1;
     }
     /* Nearby-map center: RC,lat_e6,lon_e6 */
@@ -98,13 +102,14 @@ static int parse_line(char *line)
         ev.type = ROUNDNAV_EVENT_MAP_BEGIN; ev.count = a;
         return post_event(&ev) ? 0 : -1;
     }
-    /* Route point: optional traffic code applies from this point to the next. */
-    const int point_fields = sscanf(line, " %c , %d , %d , %d , %d", &kind, &a, &b, &c, &d);
+    /* Traffic applies to the outgoing edge; the optional turn is at this vertex. */
+    const int point_fields = sscanf(line, " %c , %d , %d , %d , %d , %c", &kind, &a, &b, &c, &d, &ev.route_turn);
     if (point_fields >= 4 && (kind == 'P' || kind == 'p')) {
         if (a < 0 || a >= 500 || b < -90000000 || b > 90000000 || c < -180000000 || c > 180000000) return -1;
-        if (point_fields == 5 && (d < 0 || d > 3)) return -1;
+        if (point_fields >= 5 && (d < 0 || d > 3)) return -1;
+        if (point_fields == 6 && ev.route_turn != 'L' && ev.route_turn != 'R' && ev.route_turn != 'U') return -1;
         ev.type = ROUNDNAV_EVENT_MAP_POINT; ev.index = a; ev.lat_e6 = b; ev.lon_e6 = c;
-        ev.traffic = point_fields == 5 ? d : 0;
+        ev.traffic = point_fields >= 5 ? d : 0;
         return post_event(&ev) ? 0 : -1;
     }
     if (strcmp(line, "E") == 0 || strcmp(line, "e") == 0) {
@@ -228,12 +233,12 @@ esp_err_t roundnav_ble_init(QueueHandle_t event_queue)
         ESP_LOGE(TAG, "nimble_port_init failed: %s", esp_err_to_name(init_err));
         return init_err;
     }
+    if (ble_att_set_preferred_mtu(243) != 0) return ESP_FAIL;
     ble_svc_gap_init();
     ble_svc_gatt_init();
     ble_svc_gap_device_name_set("RoundNav");
     int rc = ble_gatts_count_cfg(s_services);
     if (rc != 0) return ESP_FAIL;
-    if (ble_att_set_preferred_mtu(243) != 0) return ESP_FAIL;
     rc = ble_gatts_add_svcs(s_services);
     if (rc != 0) return ESP_FAIL;
     ble_hs_cfg.sync_cb = on_sync;

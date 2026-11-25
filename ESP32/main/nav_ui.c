@@ -59,6 +59,7 @@ static int s_cache_front;
 static bool s_cache_valid, s_cache_dirty;
 static int s_build_row, s_build_road = -1, s_build_point;
 static int s_view_dx, s_view_dy, s_view_heading = -1;
+static int32_t s_view_progress_dm = -1;
 static lv_obj_t *s_ble_label;
 static lv_obj_t *s_nav_label;
 static lv_obj_t *s_distance_label;
@@ -73,9 +74,12 @@ static lv_point_precise_t s_marker_points[MARKER_ROWS][2];
 static road_store_t s_road_store;
 static geo_point_t s_route[ROUTE_MAX_POINTS];
 static uint8_t s_route_traffic[ROUTE_MAX_POINTS];
+static char s_route_turns[ROUTE_MAX_POINTS];
+static float s_route_meters[ROUTE_MAX_POINTS];
 static int s_route_count;
 static geo_point_t s_pending_route[ROUTE_MAX_POINTS];
 static uint8_t s_pending_traffic[ROUTE_MAX_POINTS];
+static char s_pending_turns[ROUTE_MAX_POINTS];
 static int s_pending_route_expected;
 static int s_pending_route_count;
 /* Double preserves sub-metre movement at absolute longitude ~121 degrees. */
@@ -92,8 +96,11 @@ static float s_heading_from, s_heading_delta;
 static uint32_t s_camera_start, s_camera_duration, s_last_fix_tick;
 static bool s_camera_animating;
 static bool s_camera_refresh_ready;
+static bool s_route_tracking, s_camera_follows_route;
+static double s_route_progress = -1, s_progress_from, s_progress_to;
 static char s_direction = 'S';
 static int32_t s_distance_m = -1;
+static void set_navigation_cue(char direction, int32_t meters);
 
 /* All counters are accessed under the LVGL lock. Rendering time includes
  * waits inside LVGL, but the last asynchronous DMA can finish afterwards. */
@@ -240,17 +247,16 @@ static void draw_cache_batch(const map_cache_t *back)
     lv_layer_t layer;
     lv_canvas_init_layer(back->canvas, &layer);
     int budget = CACHE_SEGMENTS_PER_BATCH;
-    while (budget > 0 && s_build_road <= ROAD_MAX_COUNT) {
-        const bool route = s_build_road == ROAD_MAX_COUNT;
-        const road_t *road = route ? NULL : &s_build_roads[s_build_road];
-        const geo_point_t *points = route ? s_route : road->points;
-        const int count = route ? s_route_count : road->active ? road->count : 0;
+    while (budget > 0 && s_build_road < ROAD_MAX_COUNT) {
+        const road_t *road = &s_build_roads[s_build_road];
+        const geo_point_t *points = road->points;
+        const int count = road->active ? road->count : 0;
         if (s_build_point >= count) {
             ++s_build_road;
             s_build_point = 1;
             continue;
         }
-        if (road && road->road_class == ROAD_CLASS_BUILDING) {
+        if (road->road_class == ROAD_CLASS_BUILDING) {
             fill_building(back, road);
             ++s_build_road;
             s_build_point = 1;
@@ -259,12 +265,11 @@ static void draw_cache_batch(const map_cache_t *back)
         }
         lv_draw_line_dsc_t line;
         lv_draw_line_dsc_init(&line);
-        line.color = route ? lv_color_hex(ROUTE_RGB) : road_color(road->road_class);
-        line.width = route ? 6 : road_width(road->road_class);
+        line.color = road_color(road->road_class);
+        line.width = road_width(road->road_class);
         line.round_start = line.round_end = true;
         project_point(&points[s_build_point - 1], &back->origin, 1, 0, ROAD_BITMAP_PX / 2, &line.p1);
         while (budget > 0 && s_build_point < count) {
-            if (route) line.color = route_color(s_route_traffic[s_build_point - 1]);
             project_point(&points[s_build_point++], &back->origin, 1, 0, ROAD_BITMAP_PX / 2, &line.p2);
             lv_draw_line(&layer, &line);
             line.p1 = line.p2;
@@ -274,12 +279,76 @@ static void draw_cache_batch(const map_cache_t *back)
     lv_canvas_finish_layer(back->canvas, &layer);
 }
 
+static bool clip_route_axis(int start, int delta, double *first, double *last)
+{
+    if (!delta) return start >= -3 && start < MAP_DIAMETER_PX + 3;
+    const double a = (-3.0 - start) / delta;
+    const double b = (MAP_DIAMETER_PX + 2.0 - start) / delta;
+    *first = fmax(*first, fmin(a, b));
+    *last = fmin(*last, fmax(a, b));
+    return *first <= *last;
+}
+
+static void draw_route_segment(int x, int y, int end_x, int end_y, uint16_t color)
+{
+    const int dx = end_x - x, dy = end_y - y;
+    double first = 0, last = 1;
+    if (!clip_route_axis(x, dx, &first, &last) || !clip_route_axis(y, dy, &first, &last)) return;
+    int px = x + (int)lround(dx * first), py = y + (int)lround(dy * first);
+    const int last_x = x + (int)lround(dx * last), last_y = y + (int)lround(dy * last);
+    const int width = abs(last_x - px), height = abs(last_y - py);
+    const int step_x = px < last_x ? 1 : -1, step_y = py < last_y ? 1 : -1;
+    int error = width - height;
+    while (true) {
+        for (int row = -2; row <= 2; ++row) {
+            const int sy = py + row;
+            if ((unsigned)sy >= MAP_DIAMETER_PX) continue;
+            const int half_width = abs(row) == 2 ? 2 : 3;
+            const int left = LV_MAX(px - half_width, s_view_inset[sy]);
+            const int right = LV_MIN(px + half_width, MAP_DIAMETER_PX - s_view_inset[sy] - 1);
+            for (int sx = left; sx <= right; ++sx) s_view_pixels[sy * s_view_stride + sx] = color;
+        }
+        if (px == last_x && py == last_y) break;
+        const int doubled = 2 * error;
+        if (doubled > -height) { error -= height; px += step_x; }
+        if (doubled < width) { error += width; py += step_y; }
+    }
+}
+
+static void draw_route_overlay(void)
+{
+    if (s_route_count < 2) return;
+    const map_origin_t origin = camera_origin();
+    lv_point_precise_t a, b;
+    project_point(&s_route[0], &origin, s_heading_cos, s_heading_sin, MAP_RADIUS_PX, &a);
+    for (int i = 1; i < s_route_count; ++i, a = b) {
+        project_point(&s_route[i], &origin, s_heading_cos, s_heading_sin, MAP_RADIUS_PX, &b);
+        const float start = s_route_meters[i - 1], end = s_route_meters[i];
+        const uint16_t neutral = lv_color_to_u16(lv_color_hex(ROUTE_RGB));
+        const uint16_t traffic = lv_color_to_u16(route_color(s_route_traffic[i - 1]));
+        if (s_route_progress >= end) {
+            draw_route_segment(a.x, a.y, b.x, b.y, neutral);
+        } else if (s_route_progress <= start || end <= start) {
+            draw_route_segment(a.x, a.y, b.x, b.y, traffic);
+        } else {
+            const double t = (s_route_progress - start) / (end - start);
+            const int x = (int)lround(a.x + (b.x - a.x) * t);
+            const int y = (int)lround(a.y + (b.y - a.y) * t);
+            draw_route_segment(a.x, a.y, x, y, neutral);
+            draw_route_segment(x, y, b.x, b.y, traffic);
+        }
+    }
+}
+
 static void compose_map_view(const map_cache_t *front, int dx, int dy)
 {
-    if (dx == s_view_dx && dy == s_view_dy && s_heading_tenths == s_view_heading) return;
+    const int32_t progress_dm = (int32_t)lround(s_route_progress * 10);
+    if (dx == s_view_dx && dy == s_view_dy && s_heading_tenths == s_view_heading &&
+        progress_dm == s_view_progress_dm) return;
     s_view_dx = dx;
     s_view_dy = dy;
     s_view_heading = s_heading_tenths;
+    s_view_progress_dm = progress_dm;
 
     const int radius = MAP_DIAMETER_PX / 2;
     const int cx = ROAD_BITMAP_PX / 2 - dx;
@@ -316,6 +385,7 @@ static void compose_map_view(const map_cache_t *front, int dx, int dy)
             sy += sn;
         }
     }
+    draw_route_overlay();
     lv_obj_invalidate(s_map_view);
 }
 
@@ -335,8 +405,8 @@ static void refresh_cached_map(void)
          * Restart its back buffer, while the front buffer keeps moving. */
         do {
             draw_cache_batch(back);
-        } while (s_build_road <= ROAD_MAX_COUNT && esp_timer_get_time() - started < CACHE_SLICE_US);
-        if (s_build_road > ROAD_MAX_COUNT) {
+        } while (s_build_road < ROAD_MAX_COUNT && esp_timer_get_time() - started < CACHE_SLICE_US);
+        if (s_build_road == ROAD_MAX_COUNT) {
             s_build_road = -1;
             s_cache_front = 1 - s_cache_front;
             s_cache_valid = true;
@@ -441,6 +511,25 @@ static void wake_display(void)
 }
 
 /* Called with the LVGL lock held (timer callbacks already hold that lock). */
+static void apply_route_progress(double meters)
+{
+    const int last = s_route_count - 1;
+    const double total = s_route_meters[last];
+    /* Android sends decimetres while the display measures the encoded vertices. */
+    s_route_progress = meters + 0.15 >= total ? total : meters;
+    int end = 1;
+    while (end < last && s_route_meters[end] <= s_route_progress) ++end;
+    const double length = s_route_meters[end] - s_route_meters[end - 1];
+    const double fraction = length > 0 ? (s_route_progress - s_route_meters[end - 1]) / length : 1;
+    const geo_point_t *a = &s_route[end - 1], *b = &s_route[end];
+    s_center_lat_e6 = a->lat + (b->lat - a->lat) * fraction;
+    s_center_lon_e6 = a->lon + (b->lon - a->lon) * fraction;
+
+    while (end < last && !s_route_turns[end]) ++end;
+    const int32_t remaining = (int32_t)ceil(s_route_meters[end] - s_route_progress);
+    set_navigation_cue(end < last && remaining <= 500 ? s_route_turns[end] : 'S', remaining);
+}
+
 static void advance_camera(uint32_t now)
 {
     if (!s_camera_animating) return;
@@ -448,6 +537,7 @@ static void advance_camera(uint32_t now)
     const double t = elapsed >= s_camera_duration ? 1.0 : (double)elapsed / s_camera_duration;
     s_center_lat_e6 = s_camera_from_lat + (s_camera_to_lat - s_camera_from_lat) * t;
     s_center_lon_e6 = s_camera_from_lon + (s_camera_to_lon - s_camera_from_lon) * t;
+    if (s_camera_follows_route) apply_route_progress(s_progress_from + (s_progress_to - s_progress_from) * t);
     set_map_heading(fmodf(s_heading_from + s_heading_delta * (float)t + 360.0f, 360.0f));
     render_roads(false);
     render_route();
@@ -566,15 +656,17 @@ static void update_nav_label(void)
     else if (s_direction == 'U') word = "U-TURN";
     else if (s_distance_m == 0) word = "ARRIVED";
     else if (s_distance_m < 0) word = "";
-    lv_obj_set_hidden(s_nav_card, word[0] == '\0');
-    lv_label_set_text(s_nav_label, word);
-    draw_nav_arrow();
+    if (strcmp(lv_label_get_text(s_nav_label), word) != 0) {
+        lv_obj_set_hidden(s_nav_card, word[0] == '\0');
+        lv_label_set_text(s_nav_label, word);
+        draw_nav_arrow();
+    }
     char d[32];
     if (s_direction == 'S' && s_distance_m <= 0) d[0] = '\0';
     else if (s_distance_m < 0) snprintf(d, sizeof(d), "-- m");
     else if (s_distance_m >= 1000) snprintf(d, sizeof(d), "%.1f km", (double)s_distance_m / 1000.0);
     else snprintf(d, sizeof(d), "%ld m", (long)s_distance_m);
-    lv_label_set_text(s_distance_label, d);
+    if (strcmp(lv_label_get_text(s_distance_label), d) != 0) lv_label_set_text(s_distance_label, d);
 }
 
 static void create_map_surround(lv_obj_t *screen)
@@ -753,6 +845,8 @@ void nav_ui_set_ble_state(bool connected)
         s_pending_route_expected = 0;
         s_camera_animating = false;
         s_gps_valid = false; /* First fix after reconnect snaps to its actual location. */
+        s_route_tracking = false;
+        s_camera_follows_route = false;
         s_direction = 'S';
         s_distance_m = -1;
         update_nav_label();
@@ -764,18 +858,24 @@ void nav_ui_set_ble_state(bool connected)
     ui_unlock();
 }
 
-void nav_ui_apply_nav(const roundnav_event_t *event)
+static void set_navigation_cue(char direction, int32_t meters)
 {
-    if (event == NULL || !ui_lock()) return;
-    const bool new_direction = s_direction != event->direction;
-    s_direction = event->direction;
-    s_distance_m = event->distance_m;
+    if (s_direction == direction && s_distance_m == meters) return;
+    const bool new_direction = s_direction != direction;
+    s_direction = direction;
+    s_distance_m = meters;
     update_nav_label();
     if (s_direction == 'S' && s_distance_m == 0) {
         ESP_LOGI(TAG, "Navigation cue applied: arrival");
     } else if (new_direction) {
-        ESP_LOGI(TAG, "Navigation cue applied: %c", s_direction);
+        ESP_LOGI(TAG, "Navigation cue applied: %c at %ld m", s_direction, (long)s_distance_m);
     }
+}
+
+void nav_ui_apply_nav(const roundnav_event_t *event)
+{
+    if (event == NULL || !ui_lock()) return;
+    if (!s_route_tracking) set_navigation_cue(event->direction, event->distance_m);
     ui_unlock();
 }
 
@@ -790,10 +890,11 @@ void nav_ui_apply_map_event(const roundnav_event_t *event)
         if (event->traffic <= 3 && index >= 0 && index < s_pending_route_expected && index == s_pending_route_count) {
             s_pending_route[index] = (geo_point_t){ .lat = event->lat_e6, .lon = event->lon_e6 };
             s_pending_traffic[index] = event->traffic;
+            s_pending_turns[index] = event->route_turn;
             ++s_pending_route_count;
         } else if (!(index >= 0 && index < s_pending_route_expected && index < s_pending_route_count &&
                      s_pending_route[index].lat == event->lat_e6 && s_pending_route[index].lon == event->lon_e6 &&
-                     s_pending_traffic[index] == event->traffic)) {
+                     s_pending_traffic[index] == event->traffic && s_pending_turns[index] == event->route_turn)) {
             /* A retried ATT packet can repeat points already queued by its first write. */
             s_pending_route_expected = 0;
         }
@@ -802,8 +903,20 @@ void nav_ui_apply_map_event(const roundnav_event_t *event)
             s_route_count = s_pending_route_count;
             memcpy(s_route, s_pending_route, s_route_count * sizeof(*s_route));
             memcpy(s_route_traffic, s_pending_traffic, s_route_count);
+            memcpy(s_route_turns, s_pending_turns, s_route_count);
+            s_route_meters[0] = 0;
+            for (int i = 1; i < s_route_count; ++i) {
+                const geo_point_t *a = &s_route[i - 1], *b = &s_route[i];
+                const double east = (b->lon - a->lon) * cos((a->lat + b->lat) * DEG_TO_RAD / 2000000.0);
+                s_route_meters[i] = s_route_meters[i - 1] + hypot(east, b->lat - a->lat) * (EARTH_M * DEG_TO_RAD / 1000000.0);
+            }
+            s_route_turns[s_route_count - 1] = 0;
+            if (s_route_tracking) set_navigation_cue('S', -1);
+            s_route_progress = -1;
+            s_route_tracking = false;
+            s_camera_follows_route = false;
             if (s_map_view) {
-                s_cache_dirty = true;
+                s_view_heading = -1;
                 wake_display();
             } else {
                 render_route();
@@ -867,10 +980,18 @@ void nav_ui_apply_gps(const roundnav_event_t *event)
     const double north = (event->lat_e6 - s_center_lat_e6) * (EARTH_M * 0.017453292519943295 / 1000000.0);
     const double east = (event->lon_e6 - s_center_lon_e6) * (EARTH_M * 0.017453292519943295 / 1000000.0)
         * cos(s_center_lat_e6 * 0.017453292519943295 / 1000000.0);
-    const bool snap = !s_gps_valid || !s_camera_refresh_ready || hypot(north, east) > CAMERA_SNAP_M;
+    const bool tracking = event->has_route_progress && s_route_count >= 2 && s_route_meters[s_route_count - 1] > 0;
+    const bool snap = !s_gps_valid || !s_camera_refresh_ready || hypot(north, east) > CAMERA_SNAP_M ||
+        (tracking && !s_route_tracking);
+    if (!tracking && s_route_tracking) set_navigation_cue('S', -1);
+    s_route_tracking = tracking;
+    s_camera_follows_route = tracking;
+    s_progress_from = s_route_progress;
+    s_progress_to = event->route_progress_dm / 10.0;
     uint32_t interval = s_gps_valid ? now - s_last_fix_tick : 1000;
     if (interval < 200) interval = 200;
     if (interval > 1500) interval = 1500;
+    if (tracking && interval > 350) interval = 350;
     s_last_fix_tick = now;
     s_camera_from_lat = s_center_lat_e6;
     s_camera_from_lon = s_center_lon_e6;
@@ -884,11 +1005,13 @@ void nav_ui_apply_gps(const roundnav_event_t *event)
     s_center_valid = true;
     s_gps_valid = true;
     s_camera_animating = !snap && (fabs(s_camera_to_lat - s_camera_from_lat) > 0.001
-        || fabs(s_camera_to_lon - s_camera_from_lon) > 0.001 || fabsf(s_heading_delta) > 0.01f);
+        || fabs(s_camera_to_lon - s_camera_from_lon) > 0.001 || fabsf(s_heading_delta) > 0.01f
+        || (tracking && fabs(s_progress_to - s_progress_from) > 0.001));
     if (s_camera_animating) wake_display();
     if (snap) {
         s_center_lat_e6 = event->lat_e6;
         s_center_lon_e6 = event->lon_e6;
+        if (tracking) apply_route_progress(s_progress_to);
         set_map_heading((float)event->bearing_deg);
         if (s_map_view) {
             s_cache_dirty = true;
