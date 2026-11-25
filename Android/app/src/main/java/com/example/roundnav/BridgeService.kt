@@ -817,6 +817,11 @@ class BridgeService : Service() {
         if (now < nextRoadRequestMs) return
         val center = loadedCenter
         if (!forceRoadRefresh && !RoadMap.needsRefresh(current.latitude, current.longitude, center?.latitude, center?.longitude)) return
+        if (BuildConfig.VIETMAP_ROADS_URL.isBlank() &&
+            VietmapViewportRoads.nearby(current.latitude, current.longitude, RoadMap.DOWNLOAD_RADIUS_M).isEmpty()) {
+            roadWait(if (center == null) "等待 Vietmap 加载当前位置附近底图" else "正在加载前方 Vietmap 底图，保留已有地图")
+            return
+        }
         fetchingRoads = true
         forceRoadRefresh = false
         val generation = ++requestGeneration

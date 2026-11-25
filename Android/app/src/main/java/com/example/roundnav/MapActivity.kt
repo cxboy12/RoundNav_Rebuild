@@ -49,11 +49,15 @@ import java.net.InetSocketAddress
 import java.net.Proxy
 import java.util.Locale
 import java.util.UUID
+import kotlin.math.cos
+import kotlin.math.log2
+import kotlin.math.pow
 import kotlin.math.roundToLong
 
 class MapActivity : ComponentActivity() {
     companion object {
         internal const val EXTRA_ROUTE_PREVIEW = "routePreview"
+        private const val BUILDING_MIN_ZOOM = 15.0
     }
 
     private data class Preview(
@@ -406,6 +410,12 @@ class MapActivity : ComponentActivity() {
                 if (isDestroyed || isFinishing || preview !== value) return
                 sendStatus.text = resultData?.getString("message")
                 isSending = resultCode == BridgeService.ROUTE_QUEUED
+                if (isSending && !value.indoor && BuildConfig.VIETMAP_ROADS_URL.isBlank()) {
+                    keepRouteInView = false
+                    referenceView = false
+                    followPhone = true
+                    routeLocation?.let(::showLocation)
+                }
                 showPlayback()
             }
         }
@@ -436,6 +446,7 @@ class MapActivity : ComponentActivity() {
             else -> BridgeService.startPlayback(this, value.id, value.route, playbackSpeed)
         }
         followPhone = false
+        keepRouteInView = false
         playbackButton.isEnabled = false
     }
 
@@ -486,6 +497,29 @@ class MapActivity : ComponentActivity() {
             playbackPoint = next
             updateOverlays()
         }
+        if (active && BuildConfig.VIETMAP_ROADS_URL.isBlank()) {
+            val coveragePoint = next ?: current?.route?.coordinates?.firstOrNull()?.let { (lon, lat) -> LatLng(lat, lon) }
+            coveragePoint?.let(::followRoundMap)
+        }
+    }
+
+    private fun followRoundMap(point: LatLng) {
+        val controller = mapController ?: return
+        val shortSideDp = minOf(map.width, map.height) / resources.displayMetrics.density
+        if (shortSideDp <= 0) return
+        val screenRadius = RoadMap.DOWNLOAD_RADIUS_M / 2
+        val groundWidth = shortSideDp * (2 * Math.PI * 6_378_137 / 512) * cos(Math.toRadians(point.latitude))
+        val zoom = log2(groundWidth / (2 * (screenRadius + 2 * RoadMap.REFRESH_DISTANCE_M)))
+            .coerceIn(BUILDING_MIN_ZOOM, 16.0)
+        // On compact layouts, keep building tiles and use the smaller movement buffer at that zoom.
+        val camera = controller.cameraPosition
+        val bounds = controller.projection.visibleRegion.latLngBounds
+        val halfWidth = groundWidth / (2 * 2.0.pow(camera.zoom))
+        val buffer = ((halfWidth - screenRadius) / 2).coerceIn(0.0, RoadMap.REFRESH_DISTANCE_M)
+        if (camera.zoom >= BUILDING_MIN_ZOOM &&
+            VietmapViewportRoads.covers(bounds, point.latitude, point.longitude, screenRadius + buffer)) return
+        if (camera.zoom == zoom && camera.target == point) return
+        controller.moveCamera(CameraUpdateFactory.newLatLngZoom(point, zoom))
     }
 
     private fun hasLocationPermission() = listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
@@ -508,7 +542,13 @@ class MapActivity : ComponentActivity() {
             locationStatus.text = "手机位置 · 精度约 " + location.accuracy.toInt() + " 米" +
                 if (location.accuracy > 50) " · 粗略位置" else ""
         }
-        if (followPhone) mapController?.animateCamera(CameraUpdateFactory.newLatLng(point))
+        if (followPhone) {
+            if (BuildConfig.VIETMAP_ROADS_URL.isBlank() && BridgeService.isRouteLocation(location)) {
+                followRoundMap(point)
+            } else {
+                mapController?.animateCamera(CameraUpdateFactory.newLatLng(point))
+            }
+        }
         updateOverlays()
     }
 
@@ -592,7 +632,7 @@ class MapActivity : ComponentActivity() {
     }
 
     private fun installOverlays(style: Style) {
-        (style.getLayer("building") as? FillLayer)?.minZoom = 15f
+        (style.getLayer("building") as? FillLayer)?.minZoom = BUILDING_MIN_ZOOM.toFloat()
         val empty = FeatureCollection.fromFeatures(emptyArray<Feature>())
         for (name in listOf("accuracy", "route", "origin", "position", "destination", "playback")) {
             style.addSource(GeoJsonSource("roundnav-$name", empty))
@@ -624,7 +664,7 @@ class MapActivity : ComponentActivity() {
         val buildings = source.querySourceFeatures(arrayOf("building"), null)
         VietmapViewportRoads.publish(bounds, roads, buildings)
         roadViewport = bounds
-        android.util.Log.i("RoundNavVietmap", "SDK features loaded: roads=${roads.size} buildings=${buildings.size}")
+        android.util.Log.i("RoundNavVietmap", "SDK features loaded: roads=${roads.size} buildings=${buildings.size} zoom=${controller.cameraPosition.zoom}")
     }
 
     private fun updateOverlays() {

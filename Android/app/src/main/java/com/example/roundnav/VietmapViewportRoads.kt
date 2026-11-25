@@ -49,16 +49,15 @@ internal object VietmapViewportRoads {
         snapshot = Snapshot(bounds, roads + outlines)
     }
 
-    fun nearby(lat: Double, lon: Double, radius: Double): List<NearbyRoad> {
-        val current = snapshot ?: return emptyList()
-        // Require the whole visible round-screen area. Extra roads may come from tile buffers.
-        val screenRadius = radius / 2
-        val latMargin = screenRadius / 111_319.49
+    fun nearby(lat: Double, lon: Double, radius: Double): List<NearbyRoad> =
+        snapshot?.takeIf { covers(it.bounds, lat, lon, radius / 2) }?.roads.orEmpty()
+
+    fun covers(bounds: LatLngBounds, lat: Double, lon: Double, radius: Double): Boolean {
+        val latMargin = radius / 111_319.49
         val eastScale = 111_319.49 * cos(Math.toRadians(lat))
-        if (eastScale < 1) return emptyList()
-        val lonMargin = screenRadius / eastScale
-        if (!current.bounds.contains(LatLng(lat - latMargin, lon - lonMargin)) ||
-            !current.bounds.contains(LatLng(lat + latMargin, lon + lonMargin))) return emptyList()
-        return current.roads
+        if (eastScale < 1) return false
+        val lonMargin = radius / eastScale
+        return bounds.contains(LatLng(lat - latMargin, lon - lonMargin)) &&
+            bounds.contains(LatLng(lat + latMargin, lon + lonMargin))
     }
 }

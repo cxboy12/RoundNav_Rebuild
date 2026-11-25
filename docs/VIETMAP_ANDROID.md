@@ -16,10 +16,12 @@
 
 路线代理向 Vietmap 请求 `annotations=congestion,congestion_distance`。Android 根据实际返回的 `annotations.congestion` 起止点索引标记路线分段。绿、橙、红分别表示畅通、缓行和拥堵，蓝色表示没有对应数据。发布用代理也需要请求并透传这部分响应。手机显示按路线形状计算的分段距离，路况随重新规划获取。
 
-Android 默认从官方 SDK 已加载的街道视野读取 `road` 图层。圆屏仍使用现有的道路批次格式。手机底图需要覆盖圆屏当前所在区域。`VIETMAP_ROADS_URL` 可配置授权的 Vietmap 周边道路服务，接收 `lat`、`lon` 和 `radius`（米），返回包含 `roads` 或 `features` 的 JSON，道路线坐标为经纬度顺序。使用该接口可独立于手机地图视野补图。Vietmap 返回的测试瓦片不能由普通 MVT 解码器读取，SDK 负责处理原始瓦片。
+Android 默认从官方 SDK 已加载的视野读取 `road` 和 `building` 图层。路线模拟和前台定位跟随会在当前位置接近补图范围边缘时提前移动手机视野，并保持建筑所需的缩放级。圆屏在新瓦片准备好之前继续使用上一批底图。默认模式需要手机地图保持前台。`VIETMAP_ROADS_URL` 可配置授权的 Vietmap 周边道路服务，接收 `lat`、`lon` 和 `radius`（米），返回包含 `roads` 或 `features` 的 JSON，道路线坐标为经纬度顺序。使用该接口可独立于手机地图视野补图。Vietmap 返回的测试瓦片不能由普通 MVT 解码器读取，SDK 负责处理原始瓦片。
 
 手机在较近缩放级显示 Vietmap 建筑平面。SDK 视野有建筑数据时，圆屏每批最多附带 12 个简化外轮廓，每个 4–12 点，整个批次仍最多 40 项。`RB,id,count,4,1` 的末尾 `1` 表示建筑，`P,index,lat,lon,traffic` 的末尾可选字段表示从该点到下一点的路况，`1` 到 `3` 依次为畅通、缓行、拥堵。旧固件会读入原有字段，使用原配色绘制。新固件的缓存路径填色建筑并按路线分段着色，低内存矢量回退使用建筑描边和统一路线颜色。
 
 目前可识别 Route v4 的普通、轻微及急转左右方向。分岔、环岛和掉头的代码需要用 Vietmap 对应样例复核后接入圆屏提示。真实 GPS 路线跟踪仍按项目计划验收。
+
+当前圆屏未显示路口信号灯。已核对当前 Tilemap 样式和 Route v4 注解，现有接口未确认有可用于绘制红绿灯的坐标。Vietmap 导航 SDK 另有信号灯提醒，坐标输出方式和授权待确认。
 
 [Vietmap 开通与密钥说明](https://maps.vietmap.vn/docs/map-api/quickstart/) · [Route v4](https://maps.vietmap.vn/docs/map-api/route-version/route-v4/) · [Tilemap](https://maps.vietmap.vn/docs/map-api/tilemap/)
